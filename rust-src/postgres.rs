@@ -6,7 +6,7 @@ use aes_gcm::{
 };
 use anyhow::Context;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use postgres_native_tls::MakeTlsConnector;
 use regex::Regex;
 use schemars::JsonSchema;
@@ -1069,6 +1069,18 @@ fn cell_to_json(row: &Row, index: usize, value_type: &Type) -> anyhow::Result<Va
             .flatten()
             .map(|value| Value::String(value.0))
             .unwrap_or(Value::Null),
+        Type::BYTEA => row
+            .try_get::<_, Option<Vec<u8>>>(index)
+            .ok()
+            .flatten()
+            .map(|value| Value::String(format!("\\x{}", bytes_to_hex(&value))))
+            .unwrap_or(Value::Null),
+        Type::OID => row
+            .try_get::<_, Option<u32>>(index)
+            .ok()
+            .flatten()
+            .map(|value| json!(value))
+            .unwrap_or(Value::Null),
         Type::JSON | Type::JSONB => row
             .try_get::<_, Option<Value>>(index)
             .ok()
@@ -1092,6 +1104,12 @@ fn cell_to_json(row: &Row, index: usize, value_type: &Type) -> anyhow::Result<Va
             .flatten()
             .map(|value| Value::String(value.to_string()))
             .unwrap_or(Value::Null),
+        Type::TIME => row
+            .try_get::<_, Option<NaiveTime>>(index)
+            .ok()
+            .flatten()
+            .map(|value| Value::String(value.to_string()))
+            .unwrap_or(Value::Null),
         Type::UUID => row
             .try_get::<_, Option<Uuid>>(index)
             .ok()
@@ -1100,10 +1118,18 @@ fn cell_to_json(row: &Row, index: usize, value_type: &Type) -> anyhow::Result<Va
             .unwrap_or(Value::Null),
         _ => {
             let type_name = value_type.name();
-            anyhow::bail!("unsupported Postgres type {type_name}");
+            Value::String(format!("<unsupported Postgres type {type_name}>"))
         }
     };
     Ok(value)
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
 }
 
 fn decode_pg_numeric(raw: &[u8]) -> anyhow::Result<String> {

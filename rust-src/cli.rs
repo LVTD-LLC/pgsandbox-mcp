@@ -137,7 +137,7 @@ async fn smoke_test(args: &[String]) -> anyhow::Result<u8> {
                 profile: None,
                 database_id: database_id.clone(),
                 database_name: None,
-                sql: "create table items(id serial primary key, name text not null, price numeric(10,2) not null)".to_string(),
+                sql: "create table items(id serial primary key, name text not null, price numeric(10,2) not null, payload bytea not null, starts_at time not null)".to_string(),
                 readonly: Some(false),
                 row_limit: None,
             })
@@ -149,7 +149,7 @@ async fn smoke_test(args: &[String]) -> anyhow::Result<u8> {
                 profile: None,
                 database_id: database_id.clone(),
                 database_name: None,
-                sql: "insert into items(name, price) values ('alpha', 12.34) returning id, name, price".to_string(),
+                sql: "insert into items(name, price, payload, starts_at) values ('alpha', 12.34, decode('cafe', 'hex'), time '12:34:56') returning id, name, price, payload, starts_at".to_string(),
                 readonly: Some(false),
                 row_limit: None,
             })
@@ -171,6 +171,24 @@ async fn smoke_test(args: &[String]) -> anyhow::Result<u8> {
                 .and_then(|value| value.as_str())
                 == Some("12.34"),
             "NUMERIC value did not serialize as an exact string"
+        );
+        anyhow::ensure!(
+            inserted
+                .rows
+                .first()
+                .and_then(|row| row.get("payload"))
+                .and_then(|value| value.as_str())
+                == Some("\\xcafe"),
+            "BYTEA value did not serialize as hex"
+        );
+        anyhow::ensure!(
+            inserted
+                .rows
+                .first()
+                .and_then(|row| row.get("starts_at"))
+                .and_then(|value| value.as_str())
+                == Some("12:34:56"),
+            "TIME value did not serialize as text"
         );
         println!("{}", serde_json::to_string_pretty(&inserted)?);
 
@@ -201,6 +219,24 @@ async fn smoke_test(args: &[String]) -> anyhow::Result<u8> {
                 .and_then(|value| value.as_str())
                 == Some("12.34"),
             "TABLE query did not preserve the NUMERIC value"
+        );
+        anyhow::ensure!(
+            query
+                .rows
+                .first()
+                .and_then(|row| row.get("payload"))
+                .and_then(|value| value.as_str())
+                == Some("\\xcafe"),
+            "TABLE query did not preserve the BYTEA value"
+        );
+        anyhow::ensure!(
+            query
+                .rows
+                .first()
+                .and_then(|row| row.get("starts_at"))
+                .and_then(|value| value.as_str())
+                == Some("12:34:56"),
+            "TABLE query did not preserve the TIME value"
         );
         println!("{}", serde_json::to_string_pretty(&query)?);
 

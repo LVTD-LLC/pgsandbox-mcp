@@ -99,7 +99,9 @@ fn tool_json<T: Serialize>(result: anyhow::Result<T>) -> Result<CallToolResult, 
             let text = serde_json::to_string_pretty(&value).map_err(internal_error)?;
             Ok(CallToolResult::success(vec![Content::text(text)]))
         }
-        Err(error) => Err(internal_error(error)),
+        Err(error) => Ok(CallToolResult::error(vec![Content::text(
+            error.to_string(),
+        )])),
     }
 }
 
