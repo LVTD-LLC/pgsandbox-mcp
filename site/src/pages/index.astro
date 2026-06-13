@@ -22,7 +22,7 @@ const lifecycle = [
 
 const safeguards = [
   ['Admin stays separate', 'Lifecycle metadata uses the admin connection. User SQL runs through the sandbox role.'],
-  ['Secrets stay bounded', 'Diagnostics mask credentials. Connection strings only appear from credential-returning commands and tools.'],
+  ['Secrets stay bounded', 'Diagnostics mask credentials. Stored sandbox passwords are encrypted, and connection strings only appear from credential-returning commands and tools.'],
   ['Deletion is tracked', 'Cleanup and delete paths require a metadata row for the selected profile before dropping resources.']
 ];
 

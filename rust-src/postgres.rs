@@ -1,14 +1,21 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::LazyLock};
 
+use aes_gcm::{
+    aead::{Aead, AeadCore, OsRng},
+    Aes256Gcm, KeyInit, Nonce,
+};
 use anyhow::Context;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, Utc};
+use postgres_native_tls::MakeTlsConnector;
 use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio_postgres::{
     types::{ToSql, Type},
-    Client, NoTls, Row, SimpleQueryMessage,
+    Client, Row, SimpleQueryMessage,
 };
 use url::Url;
 use uuid::Uuid;
@@ -20,6 +27,24 @@ use crate::{
 
 const METADATA_TABLE: &str = "pgsandbox_databases";
 const DEFAULT_ROW_LIMIT: usize = 100;
+const ENCRYPTED_PASSWORD_PREFIX: &str = "v1";
+
+static READONLY_FORBIDDEN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(begin|commit|rollback|abort|end|savepoint|release|set\s+(session|transaction|local)|reset)\b",
+    )
+    .expect("readonly SQL guard regex compiles")
+});
+
+static CURSOR_QUERY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)^\s*(?:--[^\n]*(?:\n|$)|/\*.*?\*/\s*)*(select|with|values|table)\b")
+        .expect("cursor query regex compiles")
+});
+
+static TYPED_ROW_QUERY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)^\s*(?:--[^\n]*(?:\n|$)|/\*.*?\*/\s*)*(show|explain)\b|\breturning\b")
+        .expect("typed row query regex compiles")
+});
 
 #[derive(Clone)]
 pub struct PostgresSandboxManager {
@@ -149,6 +174,13 @@ struct QueryExecutionResult {
     truncated: bool,
 }
 
+#[derive(Clone, Copy)]
+enum QueryMode {
+    Cursor,
+    TypedRows,
+    Simple,
+}
+
 impl PostgresSandboxManager {
     pub fn new(config: SandboxConfig) -> Self {
         Self { config }
@@ -189,6 +221,7 @@ impl PostgresSandboxManager {
             created_database = true;
 
             let labels = serde_json::to_value(input.labels.unwrap_or_default())?;
+            let stored_role_password = protect_role_password(&role_password, &profile)?;
             client
                 .execute(
                     &format!(
@@ -204,7 +237,7 @@ impl PostgresSandboxManager {
                         &profile.name,
                         &names.database_name,
                         &names.role_name,
-                        &role_password,
+                        &stored_role_password,
                         &input.owner,
                         &input.name_hint,
                         &labels,
@@ -322,7 +355,7 @@ impl PostgresSandboxManager {
                 &profile.admin_url,
                 &record.database_name,
                 &record.role_name,
-                &record.role_password,
+                &unprotect_role_password(&record.role_password, &profile)?,
             )?,
         })
     }
@@ -367,35 +400,11 @@ impl PostgresSandboxManager {
         let row_limit = input.row_limit.unwrap_or(DEFAULT_ROW_LIMIT).min(1000);
         let (client, connection_task) = connect_url(&connection.connection_string).await?;
 
-        let result = async {
-            if input.readonly.unwrap_or(false) {
-                assert_safe_readonly_sql(&input.sql)?;
-                client
-                    .batch_execute(
-                        "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY; BEGIN READ ONLY",
-                    )
-                    .await?;
-            }
-
-            let result = if input.readonly.unwrap_or(false) {
-                run_cursor_query(&client, &input.sql, row_limit, false).await
-            } else if looks_row_producing(&input.sql) {
-                run_cursor_query(&client, &input.sql, row_limit, true).await
-            } else {
-                run_direct_query(&client, &input.sql, row_limit).await
-            };
-
-            if input.readonly.unwrap_or(false) {
-                let _ = client.batch_execute("ROLLBACK").await;
-            }
-
-            result
-        }
-        .await;
-
-        if result.is_err() && input.readonly.unwrap_or(false) {
-            let _ = client.batch_execute("ROLLBACK").await;
-        }
+        let result = if input.readonly.unwrap_or(false) {
+            run_readonly_query(&client, &input.sql, row_limit).await
+        } else {
+            run_sql_body(&client, &input.sql, row_limit, true).await
+        };
 
         drop(client);
         let _ = connection_task.await;
@@ -571,14 +580,15 @@ async fn connect_admin(
     connect_url(&profile.admin_url).await
 }
 
-async fn connect_url(
+pub(crate) async fn connect_url(
     url: &str,
 ) -> anyhow::Result<(
     Client,
     tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
 )> {
-    let (client, connection) = tokio_postgres::connect(url, NoTls).await?;
-    let task = tokio::spawn(async move { connection.await });
+    let tls = MakeTlsConnector::new(native_tls::TlsConnector::new()?);
+    let (client, connection) = tokio_postgres::connect(url, tls).await?;
+    let task = tokio::spawn(connection);
     Ok((client, task))
 }
 
@@ -682,14 +692,45 @@ fn clamp_ttl(ttl_minutes: Option<u32>, profile: &SandboxProfile) -> anyhow::Resu
 }
 
 pub fn assert_safe_readonly_sql(sql: &str) -> anyhow::Result<()> {
-    let guard = Regex::new(r"(?i)\b(begin|commit|rollback|abort|end|savepoint|release|set\s+(session|transaction)|reset)\b")
-        .expect("readonly SQL guard regex compiles");
-    if guard.is_match(sql) {
+    if READONLY_FORBIDDEN_RE.is_match(sql) {
         anyhow::bail!(
             "readonly SQL cannot include transaction-control or session-setting statements."
         );
     }
     Ok(())
+}
+
+async fn run_readonly_query(
+    client: &Client,
+    sql: &str,
+    row_limit: usize,
+) -> anyhow::Result<QueryExecutionResult> {
+    assert_safe_readonly_sql(sql)?;
+    client.batch_execute("BEGIN READ ONLY").await?;
+
+    let result = run_sql_body(client, sql, row_limit, false).await;
+    let rollback = client.batch_execute("ROLLBACK").await;
+
+    match (result, rollback) {
+        (Ok(result), Ok(())) => Ok(result),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error.into()),
+    }
+}
+
+async fn run_sql_body(
+    client: &Client,
+    sql: &str,
+    row_limit: usize,
+    cursor_owns_transaction: bool,
+) -> anyhow::Result<QueryExecutionResult> {
+    match query_mode(sql) {
+        QueryMode::Cursor => {
+            run_cursor_query(client, sql, row_limit, cursor_owns_transaction).await
+        }
+        QueryMode::TypedRows => run_typed_query(client, sql, row_limit).await,
+        QueryMode::Simple => run_direct_query(client, sql, row_limit).await,
+    }
 }
 
 async fn run_cursor_query(
@@ -737,9 +778,28 @@ async fn run_cursor_query(
         .batch_execute(&format!("CLOSE {quoted_cursor}"))
         .await;
     if owns_transaction {
-        let _ = client.batch_execute("COMMIT").await;
+        client.batch_execute("COMMIT").await?;
     }
 
+    let truncated = rows.len() > row_limit;
+    let visible_rows = rows.into_iter().take(row_limit).collect::<Vec<_>>();
+    Ok(QueryExecutionResult {
+        row_count: if truncated {
+            None
+        } else {
+            Some(visible_rows.len() as u64)
+        },
+        rows: rows_to_json(visible_rows),
+        truncated,
+    })
+}
+
+async fn run_typed_query(
+    client: &Client,
+    sql: &str,
+    row_limit: usize,
+) -> anyhow::Result<QueryExecutionResult> {
+    let rows = client.query(sql, &[]).await?;
     let truncated = rows.len() > row_limit;
     let visible_rows = rows.into_iter().take(row_limit).collect::<Vec<_>>();
     Ok(QueryExecutionResult {
@@ -809,11 +869,67 @@ fn format_simple_query_result(
     }
 }
 
-fn looks_row_producing(sql: &str) -> bool {
-    let trimmed = sql.trim_start().to_ascii_lowercase();
-    ["select", "with", "values", "show", "explain"]
-        .iter()
-        .any(|prefix| trimmed.starts_with(prefix))
+fn query_mode(sql: &str) -> QueryMode {
+    if TYPED_ROW_QUERY_RE.is_match(sql) {
+        return QueryMode::TypedRows;
+    }
+    if CURSOR_QUERY_RE.is_match(sql) {
+        return QueryMode::Cursor;
+    }
+    QueryMode::Simple
+}
+
+fn protect_role_password(password: &str, profile: &SandboxProfile) -> anyhow::Result<String> {
+    let cipher = role_password_cipher(profile)?;
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let encrypted = cipher
+        .encrypt(&nonce, password.as_bytes())
+        .map_err(|_| anyhow::anyhow!("failed to encrypt sandbox role password"))?;
+
+    Ok(format!(
+        "{ENCRYPTED_PASSWORD_PREFIX}:{}:{}",
+        URL_SAFE_NO_PAD.encode(nonce),
+        URL_SAFE_NO_PAD.encode(encrypted)
+    ))
+}
+
+fn unprotect_role_password(value: &str, profile: &SandboxProfile) -> anyhow::Result<String> {
+    let Some(rest) = value.strip_prefix(&format!("{ENCRYPTED_PASSWORD_PREFIX}:")) else {
+        return Ok(value.to_string());
+    };
+    let Some((nonce, encrypted)) = rest.split_once(':') else {
+        anyhow::bail!("stored sandbox role password is malformed");
+    };
+    let nonce = URL_SAFE_NO_PAD
+        .decode(nonce)
+        .context("stored sandbox role password nonce is invalid")?;
+    let encrypted = URL_SAFE_NO_PAD
+        .decode(encrypted)
+        .context("stored sandbox role password ciphertext is invalid")?;
+
+    if nonce.len() != 12 {
+        anyhow::bail!("stored sandbox role password nonce has invalid length");
+    }
+
+    let cipher = role_password_cipher(profile)?;
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(&nonce), encrypted.as_ref())
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "failed to decrypt sandbox role password; the admin URL may have changed"
+            )
+        })?;
+
+    String::from_utf8(plaintext).context("stored sandbox role password is not valid UTF-8")
+}
+
+fn role_password_cipher(profile: &SandboxProfile) -> anyhow::Result<Aes256Gcm> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"pgsandbox-mcp sandbox role password v1\0");
+    hasher.update(profile.admin_url.as_bytes());
+    let key = hasher.finalize();
+    Aes256Gcm::new_from_slice(&key)
+        .map_err(|_| anyhow::anyhow!("failed to initialize role password cipher"))
 }
 
 fn sandbox_record_from_row(row: &Row) -> SandboxRecord {
@@ -976,6 +1092,44 @@ mod tests {
         assert!(
             assert_safe_readonly_sql("set session characteristics as transaction read write")
                 .is_err()
+        );
+        assert!(assert_safe_readonly_sql("set local statement_timeout = 1").is_err());
+    }
+
+    #[test]
+    fn query_mode_detects_row_producing_sql() {
+        assert!(matches!(query_mode("select 1"), QueryMode::Cursor));
+        assert!(matches!(query_mode("table users"), QueryMode::Cursor));
+        assert!(matches!(
+            query_mode("insert into users(name) values ('a') returning id"),
+            QueryMode::TypedRows
+        ));
+        assert!(matches!(
+            query_mode("show server_version"),
+            QueryMode::TypedRows
+        ));
+        assert!(matches!(
+            query_mode("create table users(id int)"),
+            QueryMode::Simple
+        ));
+    }
+
+    #[test]
+    fn role_passwords_are_encrypted_at_rest() {
+        let profile = SandboxProfile {
+            name: "default".to_string(),
+            admin_url: "postgres://postgres:secret@localhost/postgres".to_string(),
+            database_prefix: "pgsandbox".to_string(),
+            default_ttl_minutes: 15,
+            max_ttl_minutes: 60,
+        };
+        let stored = protect_role_password("sandbox-secret", &profile).unwrap();
+
+        assert_ne!(stored, "sandbox-secret");
+        assert!(stored.starts_with("v1:"));
+        assert_eq!(
+            unprotect_role_password(&stored, &profile).unwrap(),
+            "sandbox-secret"
         );
     }
 }

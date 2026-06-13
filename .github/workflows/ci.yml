@@ -20,10 +20,11 @@ jobs:
             site/package-lock.json
       - uses: dtolnay/rust-toolchain@1.91.1
         with:
-          components: rustfmt
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: npm ci
       - run: cargo fmt -- --check
+      - run: cargo clippy --all-targets -- -D warnings
       - run: npm run check
       - run: npm test
       - run: npm run build

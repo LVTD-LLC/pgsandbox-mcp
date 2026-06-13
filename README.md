@@ -5,6 +5,7 @@ Safe disposable Postgres databases for coding agents.
 PGSandbox is a local MCP server that gives agents a narrow, tracked way to create, use, and clean up real Postgres databases. Agents could improvise this with `psql`, `createdb`, and shell scripts. PGSandbox exists so they do not have to improvise with admin credentials every time.
 
 It works against Postgres you already control: a local install, a container-local Postgres, a VPS, or a private development database host. It does not install Postgres or require Docker.
+Postgres URL `sslmode` settings are honored, so remote profiles can require TLS with `sslmode=require`.
 
 ## Why This Exists
 
@@ -126,7 +127,7 @@ The service uses:
 - Rust native binary
 - `rmcp` stdio MCP server
 - Postgres admin connection with permission to create databases and roles
-- metadata table for ownership, TTL, credentials, and cleanup state
+- metadata table for ownership, TTL, encrypted sandbox credentials, and cleanup state
 - optional Docker Compose only for local demo Postgres
 
 Start with [docker-compose.example.yml](docker-compose.example.yml) only if you do not already have local Postgres running.
@@ -162,6 +163,7 @@ npm run package:homebrew
 - Destructive tools only operate on resources created by this MCP.
 - Admin connections are used for lifecycle and metadata only.
 - User SQL runs through generated sandbox credentials.
+- Sandbox role passwords are encrypted before being stored in metadata.
 - Connection strings are returned only to the caller and are not logged in full.
 - The service should run locally or on a private network, not as a public internet-exposed admin surface.
 

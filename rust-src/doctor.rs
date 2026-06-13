@@ -1,10 +1,10 @@
 use std::path::Path;
 
-use tokio_postgres::NoTls;
 use url::Url;
 
 use crate::{
     config::{load_config_from_env, SandboxConfig},
+    postgres::connect_url,
     setup::{detect_existing_client_configs, find_configured_admin_url},
 };
 
@@ -92,19 +92,15 @@ async fn check_profiles(config: &SandboxConfig, lines: &mut Vec<String>, ok: &mu
 }
 
 async fn check_postgres(admin_url: &str) -> (bool, String) {
-    let connect = tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        tokio_postgres::connect(admin_url, NoTls),
-    )
-    .await;
+    let connect =
+        tokio::time::timeout(std::time::Duration::from_secs(3), connect_url(admin_url)).await;
 
-    let (client, connection) = match connect {
+    let (client, connection_task) = match connect {
         Ok(Ok(value)) => value,
         Ok(Err(error)) => return (false, error.to_string()),
         Err(_) => return (false, "connection timed out".to_string()),
     };
 
-    let connection_task = tokio::spawn(async move { connection.await });
     let result = client.query_one("SELECT 1", &[]).await;
     drop(client);
     let _ = connection_task.await;

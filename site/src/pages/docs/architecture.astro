@@ -1,7 +1,7 @@
 ---
 import DocsLayout from '../../layouts/DocsLayout.astro';
 ---
-<DocsLayout title="Architecture" description="PGSandbox MCP architecture notes."><h1>Architecture</h1><p>PGSandbox MCP is a local Rust MCP server in front of one or more reachable Postgres admin connections. It does not install or manage Postgres versions itself.</p><h2>Flow</h2><pre><code>Agent / MCP client
+<DocsLayout title="Architecture" description="PGSandbox MCP architecture notes."><h1>Architecture</h1><p>PGSandbox MCP is a local Rust MCP server in front of one or more reachable Postgres admin connections. It does not install or manage Postgres versions itself. Remote Postgres profiles can require TLS with <code>sslmode=require</code>.</p><h2>Flow</h2><pre><code>Agent / MCP client
         |
         v
 PGSandbox MCP
@@ -10,7 +10,7 @@ PGSandbox MCP
 Configured Postgres profile
         |
         v
-Task-specific databases and roles</code></pre><h2>Resource model</h2><p>Each experiment gets one database, one login role, credentials scoped to that database, a TTL, and optional labels for task, repo, branch, or agent.</p><h2>Profiles</h2><p>Profiles support multiple Postgres versions or hosts without changing the MCP contract.</p><pre><code>{`{
+Task-specific databases and roles</code></pre><h2>Resource model</h2><p>Each experiment gets one database, one login role, credentials scoped to that database, a TTL, and optional labels for task, repo, branch, or agent. Sandbox role passwords are encrypted before being persisted in metadata.</p><h2>Profiles</h2><p>Profiles support multiple Postgres versions or hosts without changing the MCP contract.</p><pre><code>{`{
   "defaultProfile": "local-pg17",
   "profiles": [
     { "name": "local-pg17", "adminUrl": "postgres://postgres:postgres@localhost:5432/postgres" },

@@ -132,16 +132,58 @@ async fn smoke_test(args: &[String]) -> anyhow::Result<u8> {
         println!("Created sandbox: {}", created.database_name);
         database_id = Some(created.database_id.clone());
 
+        manager
+            .run_sql(RunSqlInput {
+                profile: None,
+                database_id: database_id.clone(),
+                database_name: None,
+                sql: "create table items(id serial primary key, name text not null)".to_string(),
+                readonly: Some(false),
+                row_limit: None,
+            })
+            .await?;
+        println!("Created smoke-test table");
+
+        let inserted = manager
+            .run_sql(RunSqlInput {
+                profile: None,
+                database_id: database_id.clone(),
+                database_name: None,
+                sql: "insert into items(name) values ('alpha') returning id, name".to_string(),
+                readonly: Some(false),
+                row_limit: None,
+            })
+            .await?;
+        anyhow::ensure!(
+            inserted
+                .rows
+                .first()
+                .and_then(|row| row.get("name"))
+                .and_then(|value| value.as_str())
+                == Some("alpha"),
+            "INSERT ... RETURNING did not return the inserted row"
+        );
+        println!("{}", serde_json::to_string_pretty(&inserted)?);
+
         let query = manager
             .run_sql(RunSqlInput {
                 profile: None,
                 database_id: database_id.clone(),
                 database_name: None,
-                sql: "select 1 as ok".to_string(),
+                sql: "table items".to_string(),
                 readonly: Some(true),
                 row_limit: None,
             })
             .await?;
+        anyhow::ensure!(
+            query
+                .rows
+                .first()
+                .and_then(|row| row.get("name"))
+                .and_then(|value| value.as_str())
+                == Some("alpha"),
+            "TABLE query did not return the inserted row"
+        );
         println!("{}", serde_json::to_string_pretty(&query)?);
 
         manager
@@ -214,7 +256,6 @@ fn parse_options(args: &[String]) -> anyhow::Result<BTreeMap<String, String>> {
 fn next_value<'a>(args: &'a [String], index: usize, flag: &str) -> anyhow::Result<&'a str> {
     args.get(index)
         .map(String::as_str)
-        .filter(|value| !value.starts_with('-'))
         .with_context(|| format!("Missing value for {flag}"))
 }
 

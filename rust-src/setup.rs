@@ -179,6 +179,7 @@ pub fn write_client_config(
     launch: &McpLaunchConfig,
     dry_run: bool,
 ) -> Result<WriteResult, SetupError> {
+    let existed = target.path.exists();
     let content = next_config_content(target, launch)?;
 
     if !dry_run {
@@ -196,7 +197,12 @@ pub fn write_client_config(
 
     Ok(WriteResult {
         target: target.clone(),
-        action: if dry_run { "would_update" } else { "updated" },
+        action: match (dry_run, existed) {
+            (true, true) => "would_update",
+            (true, false) => "would_create",
+            (false, true) => "updated",
+            (false, false) => "created",
+        },
         content,
     })
 }
@@ -458,26 +464,14 @@ fn codex_toml_block(launch: &McpLaunchConfig) -> String {
 }
 
 fn admin_url_from_codex_toml(content: &str, server_name: &str) -> Option<String> {
-    let lines = content.lines().collect::<Vec<_>>();
-    let start = lines
-        .iter()
-        .position(|line| is_codex_server_header(line, server_name))?;
-
-    for line in &lines[start + 1..] {
-        if line.trim_start().starts_with('[') {
-            break;
-        }
-        if let Some(value) = line
-            .split_once("PGSANDBOX_ADMIN_DATABASE_URL")
-            .and_then(|(_, tail)| tail.split_once('"'))
-            .and_then(|(_, tail)| tail.split_once('"'))
-            .map(|(value, _)| value)
-        {
-            return Some(unescape_toml_string(value));
-        }
-    }
-
-    None
+    let parsed = toml::from_str::<toml::Table>(content).ok()?;
+    parsed
+        .get("mcp_servers")?
+        .get(server_name)?
+        .get("env")?
+        .get(ADMIN_DATABASE_URL_ENV)?
+        .as_str()
+        .map(ToOwned::to_owned)
 }
 
 fn admin_url_from_json_config(
@@ -546,10 +540,6 @@ fn toml_string(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn unescape_toml_string(value: &str) -> String {
-    value.replace("\\\"", "\"").replace("\\\\", "\\")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,8 +559,12 @@ mod tests {
 
         write_client_config(&target, &launch, false).unwrap();
         let parsed =
-            serde_json::from_str::<Value>(&fs::read_to_string(target.path).unwrap()).unwrap();
+            serde_json::from_str::<Value>(&fs::read_to_string(&target.path).unwrap()).unwrap();
 
+        assert_eq!(
+            write_client_config(&target, &launch, true).unwrap().action,
+            "would_update"
+        );
         assert_eq!(
             parsed["mcpServers"]["pgsandbox"]["command"],
             "pgsandbox-mcp"
@@ -578,6 +572,28 @@ mod tests {
         assert_eq!(
             parsed["mcpServers"]["pgsandbox"]["env"]["PGSANDBOX_ADMIN_DATABASE_URL"],
             "postgres://postgres:secret@localhost:5432/postgres"
+        );
+    }
+
+    #[test]
+    fn reports_created_for_new_config_files() {
+        let dir = tempdir().unwrap();
+        let target = resolve_targets(ClientSelector::Cursor, ConfigScope::Project, dir.path())
+            .unwrap()
+            .remove(0);
+        let launch = build_launch_config(None, None, None);
+
+        assert_eq!(
+            write_client_config(&target, &launch, true).unwrap().action,
+            "would_create"
+        );
+        assert_eq!(
+            write_client_config(&target, &launch, false).unwrap().action,
+            "created"
+        );
+        assert_eq!(
+            write_client_config(&target, &launch, false).unwrap().action,
+            "updated"
         );
     }
 
@@ -623,6 +639,21 @@ mod tests {
         assert_eq!(
             configured.1,
             "postgres://postgres:secret@localhost:5432/postgres"
+        );
+    }
+
+    #[test]
+    fn finds_admin_url_from_escaped_codex_toml() {
+        let content = r#"
+          [mcp_servers."pg sandbox"]
+          command = "pgsandbox-mcp"
+          args = ["stdio"]
+          env = { PGSANDBOX_ADMIN_DATABASE_URL = "postgres://postgres:\u0073ecret@localhost/postgres" }
+        "#;
+
+        assert_eq!(
+            admin_url_from_codex_toml(content, "pg sandbox").unwrap(),
+            "postgres://postgres:secret@localhost/postgres"
         );
     }
 }
