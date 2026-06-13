@@ -2,7 +2,7 @@
 
 ## V0 Design
 
-The first version is a thin MCP server in front of one or more reachable Postgres admin connections. It does not require Docker. Docker is only useful as a quick way to run Postgres locally if the developer does not already have it installed.
+The first version is a local Rust MCP server in front of one or more reachable Postgres admin connections. It does not require Docker. Docker is only useful as a quick way to run Postgres locally if the developer does not already have it installed.
 
 ```text
 Agent / MCP client

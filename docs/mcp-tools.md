@@ -1,6 +1,6 @@
 # MCP Tool Contract
 
-This is the v0 tool surface. Names and argument shapes may still change before publishing to npm.
+This is the v0 tool surface. Names and argument shapes may still change before a stable release.
 
 ## `create_database`
 

@@ -10,4 +10,4 @@ const tools = [
   ['cleanup_expired', 'Deletes expired resources, with dry-run support for audit-friendly cleanup.']
 ];
 ---
-<DocsLayout title="MCP tool contract" description="PGSandbox MCP v0 tool surface."><h1>MCP tool contract</h1><p>This is the early v0 surface. Names and argument shapes may still change before publishing to npm.</p>{tools.map(([name, body]) => <section><h2><code>{name}</code></h2><p>{body}</p></section>)}</DocsLayout>
+<DocsLayout title="MCP tool contract" description="PGSandbox MCP v0 tool surface."><h1>MCP tool contract</h1><p>This is the early v0 surface. The tools are intentionally narrow: agents can request tracked database lifecycle operations without receiving a general-purpose database admin shell.</p>{tools.map(([name, body]) => <section><h2><code>{name}</code></h2><p>{body}</p></section>)}</DocsLayout>

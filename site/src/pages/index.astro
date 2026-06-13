@@ -4,7 +4,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 const lifecycle = [
   {
     title: 'Request',
-    body: 'An agent asks for a task database with a purpose, owner, labels, and TTL.'
+    body: 'An agent asks for a task database with a purpose, owner, labels, and TTL instead of inventing admin shell commands.'
   },
   {
     title: 'Create',
@@ -37,20 +37,20 @@ const tools = [
 ];
 ---
 <BaseLayout
-  title="PGSandbox MCP - disposable Postgres for coding agents"
-  description="PGSandbox MCP gives coding agents private Postgres databases for migrations, bug repros, seeded demos, and SQL validation."
+  title="PGSandbox MCP - safe disposable Postgres for coding agents"
+  description="PGSandbox MCP gives coding agents tracked, private Postgres databases for migrations, bug repros, seeded demos, and SQL validation."
 >
   <main id="content">
     <section class="hero container">
       <div class="hero-copy">
         <p class="product-label">PGSandbox MCP</p>
-        <h1>Give every agent task its own Postgres database.</h1>
+        <h1>Stop letting agents improvise database admin work.</h1>
         <p class="lede">
-          A local MCP server for creating disposable databases, scoped roles, and cleanup metadata on Postgres you already control.
-          Agents can validate SQL without touching shared development state.
+          PGSandbox is a local MCP server that gives agents disposable Postgres databases with scoped credentials,
+          TTLs, and tracked cleanup. They can prove migrations and SQL against real Postgres without touching shared development state.
         </p>
         <div class="actions" role="group" aria-label="Primary actions">
-          <a class="button primary" href="#start">Install package</a>
+          <a class="button primary" href="#start">Install the binary</a>
           <a class="button subtle" href="/docs/">Read docs</a>
         </div>
         <dl class="client-list" aria-label="Supported MCP clients">
@@ -60,7 +60,7 @@ const tools = [
           </div>
           <div>
             <dt>Runtime</dt>
-            <dd>Node.js, stdio MCP, existing Postgres</dd>
+            <dd>Rust binary, stdio MCP, existing Postgres</dd>
           </div>
         </dl>
       </div>
@@ -72,7 +72,8 @@ const tools = [
           <code>ttl 240m</code>
         </div>
         <div class="code-panel shell">
-          <pre><code>npm install -g pgsandbox-mcp
+          <pre><code>brew tap LVTD-LLC/tap
+brew install pgsandbox-mcp
 pgsandbox-mcp setup \
   --client codex \
   --admin-url "$PGSANDBOX_ADMIN_DATABASE_URL"
@@ -112,7 +113,8 @@ pgsandbox-mcp doctor</code></pre>
         <h2>The safe database path should be the shortest path.</h2>
         <p>
           Agent tasks often need real database behavior to verify migrations, reproduce bugs, or inspect generated SQL.
-          PGSandbox makes a fresh database cheaper than asking for shared credentials or skipping the check.
+          PGSandbox makes a fresh database cheaper than handing over shared credentials, writing ad hoc cleanup scripts,
+          or skipping the check.
         </p>
       </div>
       <div class="proof-layout">
@@ -138,16 +140,17 @@ pgsandbox-mcp doctor</code></pre>
       <div class="container install-grid">
         <div class="install-copy">
           <span class="section-label">install</span>
-          <h2>Register the MCP server with one admin URL.</h2>
+          <h2>Install one binary, then register one admin URL.</h2>
           <p>
-            Use npm, npx, or Homebrew. PGSandbox does not install Postgres and does not require Docker.
+            Use Homebrew or build from source. PGSandbox does not install Postgres and does not require Docker.
             It targets a reachable Postgres instance where your configured user can create databases and roles.
           </p>
           <a class="text-link" href="/docs/install/">Open the installation guide</a>
         </div>
         <div class="code-panel shell">
           <pre><code>export PGSANDBOX_ADMIN_DATABASE_URL="postgres://postgres:postgres@localhost:5432/postgres"
-npm install -g pgsandbox-mcp
+brew tap LVTD-LLC/tap
+brew install pgsandbox-mcp
 pgsandbox-mcp setup --client codex --admin-url "$PGSANDBOX_ADMIN_DATABASE_URL"
 pgsandbox-mcp doctor</code></pre>
         </div>
@@ -161,7 +164,8 @@ pgsandbox-mcp doctor</code></pre>
           <h2>A narrow MCP surface for database proof.</h2>
         </div>
         <p>
-          The v0 tools cover creation, credentials, SQL execution, schema inspection, listing, cleanup, and explicit deletion.
+          The v0 tools cover creation, credentials, SQL execution, schema inspection, listing, cleanup, and explicit deletion
+          without exposing general-purpose database administration.
         </p>
       </div>
       <div class="tool-table" role="list">
@@ -180,11 +184,11 @@ pgsandbox-mcp doctor</code></pre>
           <span class="section-label">local first</span>
           <h2>Keep database verification inside the agent loop.</h2>
           <p>
-            Start with one Postgres admin connection, then add profiles for other hosts or versions when the workflow needs them.
+            Start with one Postgres admin connection. Add profiles later for other hosts or versions when the workflow needs them.
           </p>
         </div>
         <div class="actions">
-          <a class="button primary" href="/docs/install/">Install package</a>
+          <a class="button primary" href="/docs/install/">Install the binary</a>
           <a class="button" href="https://github.com/LVTD-LLC/pgsandbox-mcp">View repository</a>
         </div>
       </div>

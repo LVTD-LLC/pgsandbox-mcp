@@ -12,12 +12,11 @@ pgsandbox-mcp setup --client codex --admin-url postgres://postgres:postgres@loca
 
 Use Homebrew as a thin installer for a versioned GitHub release artifact:
 
-1. Build the TypeScript package.
-2. Publish the npm package for `npm install -g` and `npx` users.
-3. Create a GitHub release tarball that contains an executable `pgsandbox-mcp` Node entrypoint.
-4. Update the Homebrew tap formula with the release URL and SHA256.
+1. Build the Rust release binary.
+2. Create a GitHub release tarball that contains the executable `pgsandbox-mcp` binary.
+3. Update the Homebrew tap formula with the release URL and SHA256.
 
-This avoids asking Homebrew to resolve npm dependencies during install.
+This avoids asking users to install Node, npm, or a package manager runtime for a local MCP server.
 
 ## Formula Template
 
@@ -31,10 +30,8 @@ class PgsandboxMcp < Formula
   sha256 "REPLACE_WITH_RELEASE_TARBALL_SHA256"
   license "MIT"
 
-  depends_on "node"
-
   def install
-    bin.install "pgsandbox-mcp", "pgsandbox-mcp.cjs"
+    bin.install "pgsandbox-mcp"
   end
 
   test do
@@ -46,8 +43,7 @@ end
 ## Release Checklist
 
 ```bash
-npm ci
-npm test
+cargo test
 npm run package:homebrew
 ```
 

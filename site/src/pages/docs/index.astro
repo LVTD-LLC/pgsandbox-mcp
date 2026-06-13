@@ -2,7 +2,7 @@
 import BaseLayout from '../../layouts/BaseLayout.astro';
 
 const docs = [
-  ['Install and setup', '/docs/install/', 'npm, npx, Homebrew, supported clients, and verification commands.'],
+  ['Install and setup', '/docs/install/', 'Homebrew, source install, supported clients, and verification commands.'],
   ['MCP tools', '/docs/mcp-tools/', 'The v0 tool contract exposed to agents through MCP.'],
   ['Architecture', '/docs/architecture/', 'How PGSandbox maps profiles, databases, roles, metadata, and cleanup.'],
   ['Homebrew packaging', '/docs/homebrew/', 'Release archive shape and tap formula checklist.']
@@ -14,9 +14,9 @@ const docs = [
 >
   <main id="content" class="container docs-home">
     <span class="section-label">documentation</span>
-    <h1>Install the MCP server, then give agents a real database to test against.</h1>
+    <h1>Install one local binary, then give agents a safe database lifecycle.</h1>
     <p class="intro">
-      The docs cover the first setup path, the tool contract, the resource model, and release packaging for the early PGSandbox MCP build.
+      The docs cover setup, the narrow MCP tool contract, the tracked resource model, and release packaging for the Rust PGSandbox binary.
     </p>
     <div class="doc-grid">
       {docs.map(([title, href, body]) => (

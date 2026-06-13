@@ -1,7 +1,7 @@
 ---
 import DocsLayout from '../../layouts/DocsLayout.astro';
 ---
-<DocsLayout title="Architecture" description="PGSandbox MCP architecture notes."><h1>Architecture</h1><p>PGSandbox MCP is a thin MCP server in front of one or more reachable Postgres admin connections. It does not install or manage Postgres versions itself.</p><h2>Flow</h2><pre><code>Agent / MCP client
+<DocsLayout title="Architecture" description="PGSandbox MCP architecture notes."><h1>Architecture</h1><p>PGSandbox MCP is a local Rust MCP server in front of one or more reachable Postgres admin connections. It does not install or manage Postgres versions itself.</p><h2>Flow</h2><pre><code>Agent / MCP client
         |
         v
 PGSandbox MCP
