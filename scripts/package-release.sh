@@ -2,12 +2,27 @@
 set -eu
 
 version=$(grep '^version = ' Cargo.toml | head -n 1 | sed 's/version = "\(.*\)"/\1/')
-target="${1:-$(rustc -vV | sed -n 's/^host: //p')}"
+host_target="$(rustc -vV | sed -n 's/^host: //p')"
+explicit_target=false
+if [ "$#" -gt 0 ]; then
+  target="$1"
+  explicit_target=true
+elif [ -n "${CARGO_BUILD_TARGET:-}" ]; then
+  target="$CARGO_BUILD_TARGET"
+  explicit_target=true
+else
+  target="$host_target"
+fi
 target_dir="${CARGO_TARGET_DIR:-target}"
 binary="$target_dir/$target/release/pgsandbox-mcp"
 
 if [ ! -f "$binary" ]; then
-  binary="$target_dir/release/pgsandbox-mcp"
+  if [ "$explicit_target" = "false" ] && [ "$target" = "$host_target" ] && [ -f "$target_dir/release/pgsandbox-mcp" ]; then
+    binary="$target_dir/release/pgsandbox-mcp"
+  else
+    printf 'error: release binary not found for target %s. Run cargo build --release --target %s first.\n' "$target" "$target" >&2
+    exit 1
+  fi
 fi
 
 [ -f "$binary" ] || {
