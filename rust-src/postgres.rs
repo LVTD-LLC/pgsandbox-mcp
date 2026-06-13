@@ -27,6 +27,7 @@ use crate::{
 
 const METADATA_TABLE: &str = "pgsandbox_databases";
 const DEFAULT_ROW_LIMIT: usize = 100;
+const LIST_DATABASES_LIMIT: usize = 100;
 const ENCRYPTED_PASSWORD_PREFIX: &str = "v1";
 
 static READONLY_FORBIDDEN_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -92,6 +93,13 @@ pub struct ListDatabasesInput {
 pub struct CleanupExpiredInput {
     pub profile: Option<String>,
     pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListDatabasesOutput {
+    pub databases: Vec<Value>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -398,7 +406,10 @@ impl PostgresSandboxManager {
         })
     }
 
-    pub async fn list_databases(&self, input: ListDatabasesInput) -> anyhow::Result<Vec<Value>> {
+    pub async fn list_databases(
+        &self,
+        input: ListDatabasesInput,
+    ) -> anyhow::Result<ListDatabasesOutput> {
         let profile = find_profile(&self.config, input.profile.as_deref())?.clone();
         let (client, connection_task) = connect_admin(&profile).await?;
         ensure_metadata_table(&client).await?;
@@ -413,9 +424,10 @@ impl PostgresSandboxManager {
                         AND deleted_at IS NULL
                         AND ($2::text IS NULL OR owner = $2)
                       ORDER BY created_at DESC
-                      LIMIT 100
+                      LIMIT {}
                     "#,
-                    quote_ident(METADATA_TABLE)?
+                    quote_ident(METADATA_TABLE)?,
+                    LIST_DATABASES_LIMIT + 1
                 ),
                 &[&profile.name, &input.owner],
             )
@@ -423,7 +435,15 @@ impl PostgresSandboxManager {
         drop(client);
         let _ = connection_task.await;
 
-        Ok(rows.iter().map(record_summary_to_json).collect())
+        let truncated = rows.len() > LIST_DATABASES_LIMIT;
+        Ok(ListDatabasesOutput {
+            databases: rows
+                .iter()
+                .take(LIST_DATABASES_LIMIT)
+                .map(record_summary_to_json)
+                .collect(),
+            truncated,
+        })
     }
 
     pub async fn run_sql(&self, input: RunSqlInput) -> anyhow::Result<RunSqlOutput> {

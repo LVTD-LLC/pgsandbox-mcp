@@ -91,7 +91,8 @@ Inputs:
 
 Returns:
 
-- database metadata without full secrets
+- `databases`: database metadata without full secrets
+- `truncated`: whether more matching records exist beyond the returned page
 
 ## `cleanup_expired`
 

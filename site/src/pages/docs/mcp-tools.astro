@@ -6,7 +6,7 @@ const tools = [
   ['get_connection_string', 'Returns the connection string for a created sandbox database plus expiry metadata.'],
   ['run_sql', 'Runs SQL against an experiment database with optional readonly mode and capped row limits.'],
   ['describe_schema', 'Returns tables, columns, indexes, and extensions for an experiment database.'],
-  ['list_databases', 'Lists active experiment databases, optionally filtered by owner, without exposing full secrets.'],
+  ['list_databases', 'Lists active experiment databases, optionally filtered by owner, with a truncation flag and no full secrets.'],
   ['cleanup_expired', 'Deletes expired resources, with dry-run support for audit-friendly cleanup.']
 ];
 ---
