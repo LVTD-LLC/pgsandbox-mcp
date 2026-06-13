@@ -7,6 +7,7 @@
     "build": "cargo build --release",
     "check": "cargo check",
     "package:homebrew": "cargo build --release && sh scripts/package-homebrew.sh",
+    "package:release": "cargo build --release && sh scripts/package-release.sh",
     "test": "cargo test",
     "typecheck": "cargo check",
     "start": "cargo run --",
