@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio_postgres::{
     types::{FromSql, ToSql, Type},
-    Client, Row, SimpleQueryMessage,
+    Client, NoTls, Row, SimpleQueryMessage,
 };
 use url::Url;
 use uuid::Uuid;
@@ -637,10 +637,98 @@ pub(crate) async fn connect_url(
     Client,
     tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
 )> {
-    let tls = MakeTlsConnector::new(native_tls::TlsConnector::new()?);
+    match ssl_mode_from_url(url)? {
+        SslMode::Disable => connect_url_no_tls(url).await,
+        SslMode::Allow => match connect_url_no_tls(url).await {
+            Ok(connection) => Ok(connection),
+            Err(no_tls_error) => connect_url_with_tls(url, TlsVerification::VerifyFull)
+                .await
+                .with_context(|| format!("plaintext connection failed: {no_tls_error}")),
+        },
+        SslMode::Prefer => match connect_url_with_tls(url, TlsVerification::VerifyFull).await {
+            Ok(connection) => Ok(connection),
+            Err(tls_error) => connect_url_no_tls(url)
+                .await
+                .with_context(|| format!("TLS connection failed: {tls_error}")),
+        },
+        SslMode::Require => connect_url_with_tls(url, TlsVerification::Unverified).await,
+        SslMode::VerifyCa => connect_url_with_tls(url, TlsVerification::VerifyCa).await,
+        SslMode::VerifyFull => connect_url_with_tls(url, TlsVerification::VerifyFull).await,
+    }
+}
+
+async fn connect_url_with_tls(
+    url: &str,
+    verification: TlsVerification,
+) -> anyhow::Result<(
+    Client,
+    tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
+)> {
+    let tls = MakeTlsConnector::new(tls_connector(verification)?);
     let (client, connection) = tokio_postgres::connect(url, tls).await?;
     let task = tokio::spawn(connection);
     Ok((client, task))
+}
+
+async fn connect_url_no_tls(
+    url: &str,
+) -> anyhow::Result<(
+    Client,
+    tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
+)> {
+    let (client, connection) = tokio_postgres::connect(url, NoTls).await?;
+    let task = tokio::spawn(connection);
+    Ok((client, task))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SslMode {
+    Disable,
+    Allow,
+    Prefer,
+    Require,
+    VerifyCa,
+    VerifyFull,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TlsVerification {
+    Unverified,
+    VerifyCa,
+    VerifyFull,
+}
+
+fn ssl_mode_from_url(url: &str) -> anyhow::Result<SslMode> {
+    let parsed = Url::parse(url).context("Postgres URL is invalid")?;
+    let sslmode = parsed
+        .query_pairs()
+        .find(|(key, _)| key.eq_ignore_ascii_case("sslmode"))
+        .map(|(_, value)| value.to_ascii_lowercase());
+
+    match sslmode.as_deref().unwrap_or("prefer") {
+        "disable" => Ok(SslMode::Disable),
+        "allow" => Ok(SslMode::Allow),
+        "prefer" => Ok(SslMode::Prefer),
+        "require" => Ok(SslMode::Require),
+        "verify-ca" => Ok(SslMode::VerifyCa),
+        "verify-full" => Ok(SslMode::VerifyFull),
+        value => anyhow::bail!("unsupported Postgres sslmode: {value}"),
+    }
+}
+
+fn tls_connector(verification: TlsVerification) -> anyhow::Result<native_tls::TlsConnector> {
+    let mut builder = native_tls::TlsConnector::builder();
+    match verification {
+        TlsVerification::Unverified => {
+            builder.danger_accept_invalid_certs(true);
+            builder.danger_accept_invalid_hostnames(true);
+        }
+        TlsVerification::VerifyCa => {
+            builder.danger_accept_invalid_hostnames(true);
+        }
+        TlsVerification::VerifyFull => {}
+    }
+    Ok(builder.build()?)
 }
 
 async fn ensure_metadata_table(client: &Client) -> anyhow::Result<()> {
@@ -887,10 +975,20 @@ fn dml_returning_limit_sql(sql: &str, row_limit: usize) -> Option<String> {
         return None;
     }
     let trimmed = sql.trim().trim_end_matches(';').trim_end();
+    let alias = returning_limit_alias(trimmed);
     Some(format!(
-        "WITH pgsandbox_limited_returning AS (\n{trimmed}\n) SELECT * FROM pgsandbox_limited_returning LIMIT {}",
+        "WITH {alias} AS (\n{trimmed}\n) SELECT * FROM {alias} LIMIT {}",
         row_limit + 1
     ))
+}
+
+fn returning_limit_alias(sql: &str) -> String {
+    let digest = Sha256::digest(sql.as_bytes());
+    let mut suffix = String::with_capacity(16);
+    for byte in &digest[..8] {
+        suffix.push_str(&format!("{byte:02x}"));
+    }
+    format!("pgsandbox_limited_returning_{suffix}")
 }
 
 async fn run_direct_query(
@@ -1521,7 +1619,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(limited.starts_with("WITH pgsandbox_limited_returning AS (\ninsert into users"));
+        assert!(limited.starts_with("WITH pgsandbox_limited_returning_"));
+        assert!(limited.contains(" AS (\ninsert into users"));
         assert!(limited.ends_with("LIMIT 101"));
         let with_trailing_comment = dml_returning_limit_sql(
             "insert into users(name) values ('a') returning id -- newly created row",
@@ -1529,6 +1628,10 @@ mod tests {
         )
         .unwrap();
         assert!(with_trailing_comment.contains("-- newly created row\n) SELECT"));
+        assert_ne!(
+            returning_limit_alias("insert into users(name) values ('a') returning id"),
+            returning_limit_alias("insert into users(name) values ('b') returning id")
+        );
         assert!(dml_returning_limit_sql("select 'returning' as word", 100).is_none());
         assert!(
             dml_returning_limit_sql("update users set status = 'returning' where id = 1", 100)
@@ -1539,6 +1642,27 @@ mod tests {
             100
         )
         .is_none());
+    }
+
+    #[test]
+    fn parses_postgres_sslmodes() {
+        assert_eq!(
+            ssl_mode_from_url("postgres://postgres@localhost/postgres").unwrap(),
+            SslMode::Prefer
+        );
+        assert_eq!(
+            ssl_mode_from_url("postgres://postgres@localhost/postgres?sslmode=disable").unwrap(),
+            SslMode::Disable
+        );
+        assert_eq!(
+            ssl_mode_from_url("postgres://postgres@localhost/postgres?sslmode=require").unwrap(),
+            SslMode::Require
+        );
+        assert_eq!(
+            ssl_mode_from_url("postgres://postgres@localhost/postgres?sslmode=verify-ca").unwrap(),
+            SslMode::VerifyCa
+        );
+        assert!(ssl_mode_from_url("postgres://postgres@localhost/postgres?sslmode=nope").is_err());
     }
 
     #[test]
