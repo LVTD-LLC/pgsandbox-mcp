@@ -5,10 +5,11 @@ PGSandbox is distributed as a native Rust binary. It needs a reachable Postgres 
 ## Homebrew
 
 ```bash
-brew tap LVTD-LLC/tap
-brew install pgsandbox-mcp
+brew install LVTD-LLC/tap/pgsandbox-mcp
 pgsandbox-mcp setup --client codex --admin-url postgres://postgres:postgres@localhost:5432/postgres
 ```
+
+This uses the [LVTD-LLC/homebrew-tap](https://github.com/LVTD-LLC/homebrew-tap) repository, which Homebrew addresses as `LVTD-LLC/tap`.
 
 ## From Source
 

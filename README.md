@@ -32,11 +32,12 @@ The value is not that agents cannot use Postgres by themselves. The value is tha
 The intended local install is a native binary through Homebrew:
 
 ```bash
-brew tap LVTD-LLC/tap
-brew install pgsandbox-mcp
+brew install LVTD-LLC/tap/pgsandbox-mcp
 pgsandbox-mcp setup --client codex --admin-url postgres://postgres:postgres@localhost:5432/postgres
 pgsandbox-mcp doctor
 ```
+
+The Homebrew formula lives in [LVTD-LLC/homebrew-tap](https://github.com/LVTD-LLC/homebrew-tap). Homebrew exposes that repo as the `LVTD-LLC/tap` tap.
 
 Restart the MCP client after setup. In Codex, run `/mcp` to verify the `pgsandbox` server is available.
 
@@ -154,6 +155,8 @@ Release packaging check:
 ```bash
 npm run package:homebrew
 ```
+
+Upload the generated release archive, then update `Formula/pgsandbox-mcp.rb` in [LVTD-LLC/homebrew-tap](https://github.com/LVTD-LLC/homebrew-tap).
 
 ## Safety Rules
 

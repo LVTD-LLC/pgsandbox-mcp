@@ -72,8 +72,7 @@ const tools = [
           <code>ttl 240m</code>
         </div>
         <div class="code-panel shell">
-          <pre><code>brew tap LVTD-LLC/tap
-brew install pgsandbox-mcp
+          <pre><code>brew install LVTD-LLC/tap/pgsandbox-mcp
 pgsandbox-mcp setup \
   --client codex \
   --admin-url "$PGSANDBOX_ADMIN_DATABASE_URL"
@@ -142,15 +141,14 @@ pgsandbox-mcp doctor</code></pre>
           <span class="section-label">install</span>
           <h2>Install one binary, then register one admin URL.</h2>
           <p>
-            Use Homebrew or build from source. PGSandbox does not install Postgres and does not require Docker.
+            Use the LVTD Homebrew tap or build from source. PGSandbox does not install Postgres and does not require Docker.
             It targets a reachable Postgres instance where your configured user can create databases and roles.
           </p>
           <a class="text-link" href="/docs/install/">Open the installation guide</a>
         </div>
         <div class="code-panel shell">
           <pre><code>export PGSANDBOX_ADMIN_DATABASE_URL="postgres://postgres:postgres@localhost:5432/postgres"
-brew tap LVTD-LLC/tap
-brew install pgsandbox-mcp
+brew install LVTD-LLC/tap/pgsandbox-mcp
 pgsandbox-mcp setup --client codex --admin-url "$PGSANDBOX_ADMIN_DATABASE_URL"
 pgsandbox-mcp doctor</code></pre>
         </div>

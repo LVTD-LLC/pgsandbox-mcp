@@ -16,3 +16,6 @@ fi
 
 printf 'archive: %s\n' "$archive"
 printf 'sha256:  %s\n' "$sha256"
+printf 'tap:     LVTD-LLC/homebrew-tap (brew tap name: LVTD-LLC/tap)\n'
+printf 'formula: Formula/pgsandbox-mcp.rb\n'
+printf 'install: brew install LVTD-LLC/tap/pgsandbox-mcp\n'
