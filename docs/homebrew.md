@@ -44,9 +44,15 @@ end
 ```bash
 cargo test
 npm run package:homebrew
+npm run package:release
 ```
 
-The package command prints the release archive and SHA256. Upload the archive from `dist/`, then update the formula URL, version, and SHA in `LVTD-LLC/homebrew-tap`. Verify from the tap checkout:
+The Homebrew package command prints the release archive and SHA256 for the tap
+formula. The release package command creates a platform-specific archive named
+`pgsandbox-mcp-<version>-<target>.tar.gz` plus
+`pgsandbox-mcp-<version>-checksums.txt` for the GitHub install script. Upload
+the archives from `dist/`, then update the formula URL, version, and SHA in
+`LVTD-LLC/homebrew-tap`. Verify from the tap checkout:
 
 ```bash
 brew install --build-from-source Formula/pgsandbox-mcp.rb

@@ -41,12 +41,33 @@ The Homebrew formula lives in [LVTD-LLC/homebrew-tap](https://github.com/LVTD-LL
 
 Restart the MCP client after setup. In Codex, run `/mcp` to verify the `pgsandbox` server is available.
 
+If you do not use Homebrew, install the latest GitHub release binary with the
+hosted installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox-mcp/main/scripts/install.sh | sh
+pgsandbox-mcp setup --client codex --admin-url postgres://postgres:postgres@localhost:5432/postgres
+pgsandbox-mcp doctor
+```
+
+The installer downloads a platform-specific release archive, verifies the
+checksum when the release includes `pgsandbox-mcp-<version>-checksums.txt`, and
+installs to `~/.local/bin` by default. Use `PGSANDBOX_VERSION=0.1.0` to pin a
+release or `PGSANDBOX_INSTALL_DIR=/usr/local/bin` to choose a different install
+directory.
+
 For development from this repo:
 
 ```bash
 cargo build
 cargo run -- setup --client codex --admin-url postgres://postgres:postgres@localhost:5432/postgres
 cargo run -- smoke-test --admin-url postgres://postgres:postgres@localhost:5432/postgres
+```
+
+Rust users can also install directly from GitHub:
+
+```bash
+cargo install --git https://github.com/LVTD-LLC/pgsandbox-mcp --tag v0.1.0
 ```
 
 ## MCP Client Setup
@@ -154,9 +175,12 @@ Release packaging check:
 
 ```bash
 npm run package:homebrew
+npm run package:release
 ```
 
-Upload the generated release archive, then update `Formula/pgsandbox-mcp.rb` in [LVTD-LLC/homebrew-tap](https://github.com/LVTD-LLC/homebrew-tap).
+Upload the generated release archives and checksum file, then update
+`Formula/pgsandbox-mcp.rb` in
+[LVTD-LLC/homebrew-tap](https://github.com/LVTD-LLC/homebrew-tap).
 
 ## Safety Rules
 
