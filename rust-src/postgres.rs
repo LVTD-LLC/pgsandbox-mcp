@@ -46,6 +46,13 @@ static TYPED_ROW_QUERY_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("typed row query regex compiles")
 });
 
+static DML_RETURNING_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?is)^\s*(?:--[^\n]*(?:\n|$)|/\*.*?\*/\s*)*(insert|update|delete|merge)\b.*\breturning\b",
+    )
+    .expect("DML returning regex compiles")
+});
+
 #[derive(Clone)]
 pub struct PostgresSandboxManager {
     config: SandboxConfig,
@@ -184,6 +191,9 @@ enum QueryMode {
 #[derive(Debug)]
 struct PgNumeric(String);
 
+#[derive(Debug)]
+struct PgTimeTz(String);
+
 impl<'a> FromSql<'a> for PgNumeric {
     fn from_sql(
         ty: &Type,
@@ -197,6 +207,22 @@ impl<'a> FromSql<'a> for PgNumeric {
 
     fn accepts(ty: &Type) -> bool {
         *ty == Type::NUMERIC
+    }
+}
+
+impl<'a> FromSql<'a> for PgTimeTz {
+    fn from_sql(
+        ty: &Type,
+        raw: &'a [u8],
+    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        if *ty != Type::TIMETZ {
+            return Err(format!("unsupported type for PgTimeTz: {}", ty.name()).into());
+        }
+        Ok(Self(decode_pg_timetz(raw)?))
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::TIMETZ
     }
 }
 
@@ -818,7 +844,10 @@ async fn run_typed_query(
     sql: &str,
     row_limit: usize,
 ) -> anyhow::Result<QueryExecutionResult> {
-    let rows = client.query(sql, &[]).await?;
+    let limited_sql = dml_returning_limit_sql(sql, row_limit);
+    let rows = client
+        .query(limited_sql.as_deref().unwrap_or(sql), &[])
+        .await?;
     let truncated = rows.len() > row_limit;
     let visible_rows = rows.into_iter().take(row_limit).collect::<Vec<_>>();
     Ok(QueryExecutionResult {
@@ -830,6 +859,17 @@ async fn run_typed_query(
         rows: rows_to_json(visible_rows)?,
         truncated,
     })
+}
+
+fn dml_returning_limit_sql(sql: &str, row_limit: usize) -> Option<String> {
+    if !DML_RETURNING_RE.is_match(sql) {
+        return None;
+    }
+    let trimmed = sql.trim().trim_end_matches(';').trim_end();
+    Some(format!(
+        "WITH pgsandbox_limited_returning AS ({trimmed}) SELECT * FROM pgsandbox_limited_returning LIMIT {}",
+        row_limit + 1
+    ))
 }
 
 async fn run_direct_query(
@@ -1110,6 +1150,12 @@ fn cell_to_json(row: &Row, index: usize, value_type: &Type) -> anyhow::Result<Va
             .flatten()
             .map(|value| Value::String(value.to_string()))
             .unwrap_or(Value::Null),
+        Type::TIMETZ => row
+            .try_get::<_, Option<PgTimeTz>>(index)
+            .ok()
+            .flatten()
+            .map(|value| Value::String(value.0))
+            .unwrap_or(Value::Null),
         Type::UUID => row
             .try_get::<_, Option<Uuid>>(index)
             .ok()
@@ -1201,6 +1247,29 @@ fn decode_pg_numeric(raw: &[u8]) -> anyhow::Result<String> {
     Ok(value)
 }
 
+fn decode_pg_timetz(raw: &[u8]) -> anyhow::Result<String> {
+    let mut offset = 0;
+    let micros = read_i64(raw, &mut offset)?;
+    let timezone_seconds_west = read_i32(raw, &mut offset)?;
+    if offset != raw.len() {
+        anyhow::bail!("invalid TIMETZ payload length");
+    }
+    if !(0..86_400_000_000).contains(&micros) {
+        anyhow::bail!("invalid TIMETZ time");
+    }
+
+    let seconds = (micros / 1_000_000) as u32;
+    let nanos = ((micros % 1_000_000) * 1_000) as u32;
+    let time = NaiveTime::from_num_seconds_from_midnight_opt(seconds, nanos)
+        .context("invalid TIMETZ time")?;
+    let offset_seconds_east = -timezone_seconds_west;
+    let sign = if offset_seconds_east >= 0 { '+' } else { '-' };
+    let absolute_offset = offset_seconds_east.abs();
+    let hours = absolute_offset / 3600;
+    let minutes = (absolute_offset % 3600) / 60;
+    Ok(format!("{time}{sign}{hours:02}:{minutes:02}"))
+}
+
 fn read_i16(raw: &[u8], offset: &mut usize) -> anyhow::Result<i16> {
     if raw.len() < *offset + 2 {
         anyhow::bail!("invalid NUMERIC payload length");
@@ -1216,6 +1285,38 @@ fn read_u16(raw: &[u8], offset: &mut usize) -> anyhow::Result<u16> {
     }
     let value = u16::from_be_bytes([raw[*offset], raw[*offset + 1]]);
     *offset += 2;
+    Ok(value)
+}
+
+fn read_i32(raw: &[u8], offset: &mut usize) -> anyhow::Result<i32> {
+    if raw.len() < *offset + 4 {
+        anyhow::bail!("invalid payload length");
+    }
+    let value = i32::from_be_bytes([
+        raw[*offset],
+        raw[*offset + 1],
+        raw[*offset + 2],
+        raw[*offset + 3],
+    ]);
+    *offset += 4;
+    Ok(value)
+}
+
+fn read_i64(raw: &[u8], offset: &mut usize) -> anyhow::Result<i64> {
+    if raw.len() < *offset + 8 {
+        anyhow::bail!("invalid payload length");
+    }
+    let value = i64::from_be_bytes([
+        raw[*offset],
+        raw[*offset + 1],
+        raw[*offset + 2],
+        raw[*offset + 3],
+        raw[*offset + 4],
+        raw[*offset + 5],
+        raw[*offset + 6],
+        raw[*offset + 7],
+    ]);
+    *offset += 8;
     Ok(value)
 }
 
@@ -1257,6 +1358,19 @@ mod tests {
     }
 
     #[test]
+    fn limits_top_level_dml_returning_queries() {
+        let limited = dml_returning_limit_sql(
+            "insert into users(name) values ('a') returning id, name;",
+            100,
+        )
+        .unwrap();
+
+        assert!(limited.starts_with("WITH pgsandbox_limited_returning AS (insert into users"));
+        assert!(limited.ends_with("LIMIT 101"));
+        assert!(dml_returning_limit_sql("select 'returning' as word", 100).is_none());
+    }
+
+    #[test]
     fn role_passwords_are_encrypted_at_rest() {
         let profile = SandboxProfile {
             name: "default".to_string(),
@@ -1291,6 +1405,12 @@ mod tests {
         );
     }
 
+    #[test]
+    fn decodes_postgres_timetz_values() {
+        let raw = timetz_raw(45_296_000_000, 18_000);
+        assert_eq!(decode_pg_timetz(&raw).unwrap(), "12:34:56-05:00");
+    }
+
     fn numeric_raw(weight: i16, sign: u16, dscale: i16, digits: &[i16]) -> Vec<u8> {
         let mut raw = Vec::new();
         raw.extend_from_slice(&(digits.len() as i16).to_be_bytes());
@@ -1300,6 +1420,13 @@ mod tests {
         for digit in digits {
             raw.extend_from_slice(&digit.to_be_bytes());
         }
+        raw
+    }
+
+    fn timetz_raw(micros: i64, timezone_seconds_west: i32) -> Vec<u8> {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&micros.to_be_bytes());
+        raw.extend_from_slice(&timezone_seconds_west.to_be_bytes());
         raw
     }
 }
