@@ -33,7 +33,7 @@ else
 fi
 
 if [ -f "$checksums" ]; then
-  awk -v name="$archive_name" '$2 != name' "$checksums" > "$checksums.tmp" || true
+  awk -v name="$archive_name" '$2 != name' "$checksums" > "$checksums.tmp"
   mv "$checksums.tmp" "$checksums"
 fi
 printf '%s  %s\n' "$sha256" "$archive_name" >> "$checksums"
