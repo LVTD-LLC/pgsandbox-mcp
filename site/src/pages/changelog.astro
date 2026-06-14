@@ -15,6 +15,11 @@ type InlineSegment =
   | {
       kind: 'code';
       value: string;
+    }
+  | {
+      kind: 'link';
+      href: string;
+      value: string;
     };
 
 function isValidIsoDate(value: string) {
@@ -64,17 +69,22 @@ function parseChangelog(markdown: string) {
   return days.filter((day) => day.entries.length > 0);
 }
 
-function parseInlineCode(value: string) {
+function parseInline(value: string) {
   const segments: InlineSegment[] = [];
-  const codePattern = /`([^`]+)`/g;
+  const inlinePattern = /`([^`]+)`|\[([^\]]+)\]\(([^)\s]+)\)/g;
   let cursor = 0;
 
-  for (const match of value.matchAll(codePattern)) {
+  for (const match of value.matchAll(inlinePattern)) {
     if (match.index > cursor) {
       segments.push({ kind: 'text', value: value.slice(cursor, match.index) });
     }
 
-    segments.push({ kind: 'code', value: match[1] });
+    if (match[1]) {
+      segments.push({ kind: 'code', value: match[1] });
+    } else {
+      segments.push({ kind: 'link', value: match[2], href: match[3] });
+    }
+
     cursor = match.index + match[0].length;
   }
 
@@ -108,15 +118,23 @@ if (days.length === 0) {
     <div class="changelog-list" aria-label="Dated changelog entries">
       {days.map((day) => (
         <section class="change-day" aria-labelledby={`changes-${day.date}`}>
-          <time datetime={day.date}>{day.date}</time>
+          <time datetime={day.date} aria-hidden="true">{day.date}</time>
           <div>
-            <h2 id={`changes-${day.date}`}>{day.date}</h2>
+            <h2 id={`changes-${day.date}`} class="sr-only">Changes for {day.date}</h2>
             <ul>
               {day.entries.map((entry) => (
                 <li>
-                  {parseInlineCode(entry).map((segment) =>
-                    segment.kind === 'code' ? <code>{segment.value}</code> : segment.value
-                  )}
+                  {parseInline(entry).map((segment) => {
+                    if (segment.kind === 'code') {
+                      return <code>{segment.value}</code>;
+                    }
+
+                    if (segment.kind === 'link') {
+                      return <a href={segment.href}>{segment.value}</a>;
+                    }
+
+                    return segment.value;
+                  })}
                 </li>
               ))}
             </ul>
@@ -163,6 +181,16 @@ if (days.length === 0) {
     gap: 2rem;
     padding: 1.6rem 0;
     border-bottom: 1px solid var(--line);
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
 
   .change-day time {
