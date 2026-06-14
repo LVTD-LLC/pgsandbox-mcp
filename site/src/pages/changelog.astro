@@ -1,0 +1,238 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import { readFile } from 'node:fs/promises';
+
+type ChangelogDay = {
+  date: string;
+  entries: string[];
+};
+
+type InlineSegment =
+  | {
+      kind: 'text';
+      value: string;
+    }
+  | {
+      kind: 'code';
+      value: string;
+    }
+  | {
+      kind: 'link';
+      href: string;
+      value: string;
+    };
+
+function isValidIsoDate(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return false;
+  }
+
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value;
+}
+
+function parseChangelog(markdown: string) {
+  const days: ChangelogDay[] = [];
+  let currentDay: ChangelogDay | undefined;
+
+  for (const line of markdown.split(/\r?\n/)) {
+    const heading = line.match(/^##\s+(.+?)\s*$/);
+
+    if (heading) {
+      const date = heading[1];
+
+      if (!isValidIsoDate(date)) {
+        throw new Error(`CHANGELOG.md section "${date}" must use YYYY-MM-DD format.`);
+      }
+
+      currentDay = { date, entries: [] };
+      days.push(currentDay);
+      continue;
+    }
+
+    const bullet = line.match(/^\s*-\s+(.+?)\s*$/);
+
+    if (bullet) {
+      if (!currentDay) {
+        throw new Error('CHANGELOG.md entries must be grouped under a YYYY-MM-DD heading.');
+      }
+
+      currentDay.entries.push(bullet[1]);
+      continue;
+    }
+
+    if (currentDay && currentDay.entries.length > 0 && /^\s{2,}\S/.test(line)) {
+      currentDay.entries[currentDay.entries.length - 1] += ` ${line.trim()}`;
+    }
+  }
+
+  return days.filter((day) => day.entries.length > 0);
+}
+
+function parseInline(value: string) {
+  const segments: InlineSegment[] = [];
+  const inlinePattern = /`([^`]+)`|\[([^\]]+)\]\(([^)\s]+)\)/g;
+  let cursor = 0;
+
+  for (const match of value.matchAll(inlinePattern)) {
+    if (match.index > cursor) {
+      segments.push({ kind: 'text', value: value.slice(cursor, match.index) });
+    }
+
+    if (match[1]) {
+      segments.push({ kind: 'code', value: match[1] });
+    } else {
+      segments.push({ kind: 'link', value: match[2], href: match[3] });
+    }
+
+    cursor = match.index + match[0].length;
+  }
+
+  if (cursor < value.length) {
+    segments.push({ kind: 'text', value: value.slice(cursor) });
+  }
+
+  return segments;
+}
+
+const changelog = await readFile(new URL('../../../CHANGELOG.md', import.meta.url), 'utf8');
+const days = parseChangelog(changelog);
+
+if (days.length === 0) {
+  throw new Error('CHANGELOG.md must contain at least one YYYY-MM-DD section with changes.');
+}
+---
+<BaseLayout
+  title="Changelog - PGSandbox MCP"
+  description="Dated changes for the PGSandbox MCP CLI, MCP server, docs, and website."
+>
+  <main id="content" class="container changelog-page">
+    <header class="changelog-header">
+      <span class="section-label">changelog</span>
+      <h1>Changes by date.</h1>
+      <p>
+        Generated from <code>CHANGELOG.md</code>. Each section is grouped under a <code>YYYY-MM-DD</code> date.
+      </p>
+    </header>
+
+    <div class="changelog-list" aria-label="Dated changelog entries">
+      {days.map((day) => (
+        <section class="change-day" aria-labelledby={`changes-${day.date}`}>
+          <time datetime={day.date} aria-hidden="true">{day.date}</time>
+          <div>
+            <h2 id={`changes-${day.date}`} class="sr-only">Changes for {day.date}</h2>
+            <ul>
+              {day.entries.map((entry) => (
+                <li>
+                  {parseInline(entry).map((segment) => {
+                    if (segment.kind === 'code') {
+                      return <code>{segment.value}</code>;
+                    }
+
+                    if (segment.kind === 'link') {
+                      return <a href={segment.href}>{segment.value}</a>;
+                    }
+
+                    return segment.value;
+                  })}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
+      ))}
+    </div>
+  </main>
+</BaseLayout>
+
+<style>
+  .changelog-page {
+    padding: 5rem 0 7rem;
+  }
+
+  .changelog-header {
+    max-width: 760px;
+  }
+
+  .changelog-header h1 {
+    margin: 0 0 1rem;
+    color: var(--ink);
+    font-size: clamp(2.6rem, 6vw, 4.6rem);
+    line-height: 1.03;
+  }
+
+  .changelog-header p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 1.08rem;
+    line-height: 1.7;
+  }
+
+  .changelog-list {
+    display: grid;
+    gap: 0;
+    margin-top: 3rem;
+    border-top: 1px solid var(--line);
+  }
+
+  .change-day {
+    display: grid;
+    grid-template-columns: 11rem minmax(0, 1fr);
+    gap: 2rem;
+    padding: 1.6rem 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .change-day time {
+    padding-top: 0.28rem;
+    color: var(--primary);
+    font-family: var(--font-mono);
+    font-size: 0.92rem;
+    font-weight: 760;
+  }
+
+  .change-day h2 {
+    margin: 0;
+    color: var(--ink);
+    font-size: 1.5rem;
+    line-height: 1.2;
+  }
+
+  .change-day ul {
+    display: grid;
+    gap: 0.72rem;
+    margin: 0.9rem 0 0;
+    padding-left: 1.2rem;
+  }
+
+  .change-day li {
+    max-width: 76ch;
+    color: var(--muted);
+    line-height: 1.65;
+  }
+
+  @media (max-width: 680px) {
+    .changelog-page {
+      padding-top: 3.5rem;
+    }
+
+    .change-day {
+      grid-template-columns: 1fr;
+      gap: 0.45rem;
+    }
+
+    .change-day time {
+      padding-top: 0;
+    }
+  }
+</style>
