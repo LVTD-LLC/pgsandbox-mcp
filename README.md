@@ -69,8 +69,11 @@ Do the following:
      values, without printing file contents
    Validate candidates with `pgsandbox-mcp doctor --admin-url "$CANDIDATE_URL"`.
    When possible, also verify the role can create databases and roles, or is a
-   superuser. If one valid candidate is found, export it as
-   PGSANDBOX_ADMIN_DATABASE_URL for this setup and continue without asking me.
+   superuser. If one valid explicit PGSANDBOX_* candidate or clearly local
+   candidate is found, export it as PGSANDBOX_ADMIN_DATABASE_URL for this setup
+   and continue without asking me. Treat generic DATABASE_URL or POSTGRES_URL
+   values that point to remote, shared, staging, or production hosts as
+   insufficient for no-interaction setup; ask me before using those.
    Ask me for a URL only after all discovery paths fail, and briefly say what
    you checked.
 5. Configure the MCP client:
@@ -91,7 +94,8 @@ Do the following:
 Constraints:
 - Do not install, start, or modify Postgres unless I explicitly ask.
 - Default to discovery and execution. Do not ask for confirmation before using a
-  discovered local Postgres admin URL that passes validation.
+  discovered explicit PGSANDBOX_* URL or local Postgres admin URL that passes
+  validation. Ask before using generic remote database URLs from app env files.
 - Do not inline the full admin URL in commands, docs, git-tracked files, shell
   startup files, or summaries. Use "$PGSANDBOX_ADMIN_DATABASE_URL" in commands.
   The MCP setup command may write the admin URL only to the selected local MCP
