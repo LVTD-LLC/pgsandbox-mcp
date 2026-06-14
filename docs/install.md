@@ -39,18 +39,21 @@ Do the following:
      POSTGRES_PASSWORD, and POSTGRES_DB metadata when available
    - passwordless local libpq candidates with psql -w over Unix sockets and
      localhost for the current user and postgres user against postgres/template1
-   - local .pg_service.conf, .pgpass, and project env files containing
-     PGSANDBOX_ADMIN_DATABASE_URL, DATABASE_URL, POSTGRES_URL, or POSTGRES_*
-     values, without printing file contents
+   - local .pg_service.conf, .pgpass, and project env files, without printing
+     file contents. Use explicit PGSANDBOX_ADMIN_DATABASE_URL values as
+     candidates. Use generic DATABASE_URL, POSTGRES_URL, or POSTGRES_* values
+     without asking only when the parsed host is clearly local: localhost,
+     127.0.0.1, ::1, a Unix socket, or a container port you just discovered.
+     Do not validate or configure generic non-local app database URLs silently.
    Validate candidates with `pgsandbox-mcp doctor --admin-url "$CANDIDATE_URL"`.
    When possible, also verify the role can create databases and roles, or is a
    superuser. If one valid explicit PGSANDBOX_* candidate or clearly local
    candidate is found, export it as PGSANDBOX_ADMIN_DATABASE_URL for this setup
-   and continue without asking me. Treat generic DATABASE_URL or POSTGRES_URL
-   values that point to remote, shared, staging, or production hosts as
-   insufficient for no-interaction setup; ask me before using those.
-   Ask me for a URL only after all discovery paths fail, and briefly say what
-   you checked.
+   and continue without asking me. Tell me which source you used and the URL
+   with the password masked, for example postgres://user:***@host/db. Ask me
+   for a URL only after all discovery paths fail or the only remaining
+   candidates are generic non-local app database URLs, and briefly say what you
+   checked.
 5. Configure the MCP client:
    pgsandbox-mcp setup --client <client> --admin-url "$PGSANDBOX_ADMIN_DATABASE_URL"
    Use --scope project for Cursor or VS Code only if I ask for project-local
@@ -70,7 +73,8 @@ Constraints:
 - Do not install, start, or modify Postgres unless I explicitly ask.
 - Default to discovery and execution. Do not ask for confirmation before using a
   discovered explicit PGSANDBOX_* URL or local Postgres admin URL that passes
-  validation. Ask before using generic remote database URLs from app env files.
+  validation. Ask before using generic non-local DATABASE_URL, POSTGRES_URL, or
+  POSTGRES_* values from app env files.
 - Do not inline the full admin URL in commands, docs, git-tracked files, shell
   startup files, or summaries. Use "$PGSANDBOX_ADMIN_DATABASE_URL" in commands.
   The MCP setup command may write the admin URL only to the selected local MCP
