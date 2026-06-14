@@ -16,20 +16,38 @@ It does not install Postgres and does not require Docker.
 
 Do the following:
 1. Detect my OS, shell, available package managers, and MCP client. Supported
-   clients are codex, cursor, vscode, claude-desktop, and all. If you cannot
-   infer the target MCP client, ask me which one to configure.
-2. If PGSANDBOX_ADMIN_DATABASE_URL is not already set, ask me to provide the
-   Postgres admin URL through the agent's secret input or an interactive shell
-   prompt. If neither is available and I paste it in chat, treat it as sensitive
-   and never repeat it except with the password masked.
-3. Install pgsandbox-mcp. Prefer:
+   clients are codex, cursor, vscode, claude-desktop, and all. If this session
+   is clearly running inside one supported MCP client, configure that client
+   without asking. If several clients are installed, prefer the active client and
+   ask only if you cannot infer where config should be written.
+2. Install pgsandbox-mcp. Prefer:
    brew install LVTD-LLC/tap/pgsandbox-mcp
    If Homebrew is unavailable, use:
    curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox-mcp/main/scripts/install.sh | sh
    If the install script uses ~/.local/bin, make sure pgsandbox-mcp is available
    in the current shell PATH before continuing.
-4. Run:
+3. Run:
    pgsandbox-mcp --version
+   If another pgsandbox-mcp appears earlier in PATH and is missing, broken, or a
+   different version, use the absolute path to the healthy installed binary in
+   the setup command with --command.
+4. Find a usable Postgres admin URL with no user interaction. Try, in order:
+   - existing PGSANDBOX_ADMIN_DATABASE_URL or PGSANDBOX_CONFIG values
+   - existing local MCP configs that already contain a pgsandbox admin URL
+   - running Docker, OrbStack, Colima, or Podman Postgres containers and exposed
+     ports; derive local URLs from container port mappings and POSTGRES_USER,
+     POSTGRES_PASSWORD, and POSTGRES_DB metadata when available
+   - passwordless local libpq candidates with psql -w over Unix sockets and
+     localhost for the current user and postgres user against postgres/template1
+   - local .pg_service.conf, .pgpass, and project env files containing
+     PGSANDBOX_ADMIN_DATABASE_URL, DATABASE_URL, POSTGRES_URL, or POSTGRES_*
+     values, without printing file contents
+   Validate candidates with `pgsandbox-mcp doctor --admin-url "$CANDIDATE_URL"`.
+   When possible, also verify the role can create databases and roles, or is a
+   superuser. If one valid candidate is found, export it as
+   PGSANDBOX_ADMIN_DATABASE_URL for this setup and continue without asking me.
+   Ask me for a URL only after all discovery paths fail, and briefly say what
+   you checked.
 5. Configure the MCP client:
    pgsandbox-mcp setup --client <client> --admin-url "$PGSANDBOX_ADMIN_DATABASE_URL"
    Use --scope project for Cursor or VS Code only if I ask for project-local
@@ -47,6 +65,8 @@ Do the following:
 
 Constraints:
 - Do not install, start, or modify Postgres unless I explicitly ask.
+- Default to discovery and execution. Do not ask for confirmation before using a
+  discovered local Postgres admin URL that passes validation.
 - Do not inline the full admin URL in commands, docs, git-tracked files, shell
   startup files, or summaries. Use "$PGSANDBOX_ADMIN_DATABASE_URL" in commands.
   The MCP setup command may write the admin URL only to the selected local MCP
