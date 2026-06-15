@@ -132,6 +132,53 @@ cargo install --git https://github.com/LVTD-LLC/pgsandbox-mcp --tag v0.1.0
 pgsandbox-mcp setup --client codex --admin-url postgres://postgres:postgres@localhost:5432/postgres
 ```
 
+## Update
+
+The installed CLI binary is the MCP server process that clients launch. Updating
+the CLI and restarting the MCP client updates the server. Rerun `setup` when the
+binary path, admin URL, selected client, or scope changes.
+
+With Homebrew:
+
+```bash
+brew update
+brew upgrade LVTD-LLC/tap/pgsandbox-mcp
+pgsandbox-mcp --version
+pgsandbox-mcp setup --client codex --admin-url "$PGSANDBOX_ADMIN_DATABASE_URL"
+pgsandbox-mcp doctor
+```
+
+With the GitHub install script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox-mcp/main/scripts/install.sh | sh
+pgsandbox-mcp --version
+pgsandbox-mcp setup --client codex --admin-url "$PGSANDBOX_ADMIN_DATABASE_URL"
+pgsandbox-mcp doctor
+```
+
+For a custom install directory, reinstall there and keep the MCP config pointed
+at the same binary:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox-mcp/main/scripts/install.sh | PGSANDBOX_INSTALL_DIR=/usr/local/bin sh
+pgsandbox-mcp setup --client codex --command /usr/local/bin/pgsandbox-mcp --admin-url "$PGSANDBOX_ADMIN_DATABASE_URL"
+```
+
+From source:
+
+```bash
+cargo install --path . --force
+# or, from GitHub:
+cargo install --git https://github.com/LVTD-LLC/pgsandbox-mcp --tag v<VERSION> --force
+```
+
+Replace `v<VERSION>` with the release tag you want to install.
+
+Rerunning `setup` updates the existing local MCP config entry and preserves
+unrelated MCP servers. Restart the MCP client after updating; in Codex, run
+`/mcp` after restart to verify the `pgsandbox` server is available.
+
 ## Supported Clients
 
 ```bash

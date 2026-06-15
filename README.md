@@ -152,6 +152,52 @@ Rust users can also install directly from GitHub:
 cargo install --git https://github.com/LVTD-LLC/pgsandbox-mcp --tag v0.1.0
 ```
 
+## Update
+
+The CLI binary is also the MCP server process. To update both, update the
+installed `pgsandbox-mcp` binary, refresh the MCP client entry if the command,
+admin URL, or target client changed, then restart the MCP client.
+
+With Homebrew:
+
+```bash
+brew update
+brew upgrade LVTD-LLC/tap/pgsandbox-mcp
+pgsandbox-mcp --version
+pgsandbox-mcp setup --client codex --admin-url "$PGSANDBOX_ADMIN_DATABASE_URL"
+pgsandbox-mcp doctor
+```
+
+With the GitHub install script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox-mcp/main/scripts/install.sh | sh
+pgsandbox-mcp --version
+pgsandbox-mcp setup --client codex --admin-url "$PGSANDBOX_ADMIN_DATABASE_URL"
+pgsandbox-mcp doctor
+```
+
+If you installed to a custom path, keep the MCP client pointed at that binary:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox-mcp/main/scripts/install.sh | PGSANDBOX_INSTALL_DIR=/usr/local/bin sh
+pgsandbox-mcp setup --client codex --command /usr/local/bin/pgsandbox-mcp --admin-url "$PGSANDBOX_ADMIN_DATABASE_URL"
+```
+
+If you installed from source, rebuild and reinstall:
+
+```bash
+cargo install --path . --force
+# or, from GitHub:
+cargo install --git https://github.com/LVTD-LLC/pgsandbox-mcp --tag v<VERSION> --force
+```
+
+Replace `v<VERSION>` with the release tag you want to install.
+
+Rerunning `setup` updates the local MCP client config in place and preserves
+unrelated MCP servers. Restart the MCP client after updating; in Codex, run
+`/mcp` after restart to verify the `pgsandbox` server is available.
+
 ## MCP Client Setup
 
 The setup command writes the right MCP config shape for each supported client:
