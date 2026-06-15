@@ -22,7 +22,7 @@ pgsandbox-mcp setup --client codex \
   --command /usr/local/bin/pgsandbox-mcp \
   --admin-url "$PGSANDBOX_ADMIN_DATABASE_URL"</code></pre><h3>Source install</h3><pre class="shell"><code>cargo install --path . --force
 # or, from GitHub:
-cargo install --git https://github.com/LVTD-LLC/pgsandbox-mcp --tag v0.1.0 --force</code></pre><p>Rerunning <code>setup</code> updates the existing local MCP config entry and preserves unrelated MCP servers. Restart the MCP client after updating; in Codex, run <code>/mcp</code> after restart to verify the <code>pgsandbox</code> server is available.</p><h2>Supported clients</h2><pre class="shell"><code>pgsandbox-mcp setup --client codex \
+cargo install --git https://github.com/LVTD-LLC/pgsandbox-mcp --tag v&lt;VERSION&gt; --force</code></pre><p>Replace <code>v&lt;VERSION&gt;</code> with the release tag you want to install.</p><p>Rerunning <code>setup</code> updates the existing local MCP config entry and preserves unrelated MCP servers. Restart the MCP client after updating; in Codex, run <code>/mcp</code> after restart to verify the <code>pgsandbox</code> server is available.</p><h2>Supported clients</h2><pre class="shell"><code>pgsandbox-mcp setup --client codex \
   --admin-url "$PGSANDBOX_ADMIN_DATABASE_URL"
 pgsandbox-mcp setup --client cursor --scope project \
   --admin-url "$PGSANDBOX_ADMIN_DATABASE_URL"

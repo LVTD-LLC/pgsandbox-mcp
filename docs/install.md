@@ -170,8 +170,10 @@ From source:
 ```bash
 cargo install --path . --force
 # or, from GitHub:
-cargo install --git https://github.com/LVTD-LLC/pgsandbox-mcp --tag v0.1.0 --force
+cargo install --git https://github.com/LVTD-LLC/pgsandbox-mcp --tag v<VERSION> --force
 ```
+
+Replace `v<VERSION>` with the release tag you want to install.
 
 Rerunning `setup` updates the existing local MCP config entry and preserves
 unrelated MCP servers. Restart the MCP client after updating; in Codex, run
