@@ -12,7 +12,7 @@ use crate::{
         CleanupExpiredInput, CloneDatabaseInput, CreateDatabaseInput, DatabaseSelector,
         ListDatabasesInput, PostgresSandboxManager, RunSqlInput,
     },
-    telemetry::{properties, Telemetry},
+    telemetry::{properties, Telemetry, EVENT_MCP_SERVER_STARTED, EVENT_MCP_TOOL_COMPLETED},
 };
 
 #[derive(Clone)]
@@ -49,7 +49,7 @@ impl PgsandboxServer {
             json!(started.elapsed().as_millis()),
         );
         self.telemetry
-            .capture_background("pgsandbox mcp tool completed", event_properties);
+            .capture_background(EVENT_MCP_TOOL_COMPLETED, event_properties);
         tool_json(result)
     }
 }
@@ -199,11 +199,12 @@ impl PgsandboxServer {
 pub async fn serve_stdio(config: SandboxConfig) -> anyhow::Result<()> {
     let profile_count = config.profiles.len();
     let server = PgsandboxServer::new(config);
-    server.telemetry.capture_background(
-        "pgsandbox mcp server started",
+    let telemetry = server.telemetry.clone();
+    let service = server.serve(rmcp::transport::stdio()).await?;
+    telemetry.capture_background(
+        EVENT_MCP_SERVER_STARTED,
         properties([("profileCount", json!(profile_count))]),
     );
-    let service = server.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
     Ok(())
 }

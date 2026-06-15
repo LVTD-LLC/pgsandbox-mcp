@@ -1,4 +1,4 @@
-use std::{fs, time::Duration};
+use std::{fs, sync::LazyLock, time::Duration};
 
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
@@ -9,11 +9,17 @@ const POSTHOG_PROJECT_TOKEN: &str = "phc_BGKAJLGN9zQ9BD8LTpRXxsE25BewML4ZnfNR8Rt
 const POSTHOG_CAPTURE_URL: &str = "https://us.i.posthog.com/i/v0/e/";
 const TELEMETRY_TIMEOUT_MS: u64 = 750;
 
+pub const EVENT_CLI_COMMAND_COMPLETED: &str = "pgsandbox_cli_command_completed";
+pub const EVENT_MCP_TOOL_COMPLETED: &str = "pgsandbox_mcp_tool_completed";
+pub const EVENT_MCP_SERVER_STARTED: &str = "pgsandbox_mcp_server_started";
+
+static SESSION_INSTALLATION_ID: LazyLock<String> = LazyLock::new(|| Uuid::new_v4().to_string());
+
 #[derive(Clone)]
 pub struct Telemetry {
     enabled: bool,
     distinct_id: Option<String>,
-    client: reqwest::Client,
+    client: Option<reqwest::Client>,
 }
 
 impl Telemetry {
@@ -21,7 +27,7 @@ impl Telemetry {
         Self {
             enabled: config.enabled,
             distinct_id: config.enabled.then(installation_id),
-            client: reqwest::Client::new(),
+            client: config.enabled.then(reqwest::Client::new),
         }
     }
 
@@ -29,7 +35,7 @@ impl Telemetry {
         Self {
             enabled: false,
             distinct_id: None,
-            client: reqwest::Client::new(),
+            client: None,
         }
     }
 
@@ -44,9 +50,12 @@ impl Telemetry {
         let Some(distinct_id) = self.distinct_id.as_deref() else {
             return;
         };
+        let Some(client) = self.client.as_ref() else {
+            return;
+        };
 
         let payload = capture_payload(distinct_id, event, properties);
-        let request = self.client.post(POSTHOG_CAPTURE_URL).json(&payload).send();
+        let request = client.post(POSTHOG_CAPTURE_URL).json(&payload).send();
         let _ = tokio::time::timeout(Duration::from_millis(TELEMETRY_TIMEOUT_MS), request).await;
     }
 
@@ -84,9 +93,8 @@ fn capture_payload(distinct_id: &str, event: &str, mut properties: Map<String, V
 }
 
 fn installation_id() -> String {
-    let id = Uuid::new_v4().to_string();
     let Some(mut path) = dirs::config_dir() else {
-        return id;
+        return session_installation_id();
     };
     path.push("pgsandbox-mcp");
     path.push("telemetry-id");
@@ -98,13 +106,18 @@ fn installation_id() -> String {
         }
     }
 
+    let id = Uuid::new_v4().to_string();
     if let Some(parent) = path.parent() {
         if fs::create_dir_all(parent).is_ok() && fs::write(&path, &id).is_ok() {
             return id;
         }
     }
 
-    id
+    session_installation_id()
+}
+
+fn session_installation_id() -> String {
+    SESSION_INSTALLATION_ID.clone()
 }
 
 #[cfg(test)]
@@ -115,12 +128,12 @@ mod tests {
     fn payload_marks_events_as_personless() {
         let payload = capture_payload(
             "install-id",
-            "pgsandbox test",
+            EVENT_MCP_TOOL_COMPLETED,
             properties([("tool", json!("create_database"))]),
         );
 
         assert_eq!(payload["api_key"], POSTHOG_PROJECT_TOKEN);
-        assert_eq!(payload["event"], "pgsandbox test");
+        assert_eq!(payload["event"], EVENT_MCP_TOOL_COMPLETED);
         assert_eq!(payload["distinct_id"], "install-id");
         assert_eq!(payload["properties"]["tool"], "create_database");
         assert_eq!(payload["properties"]["app"], "pgsandbox-mcp");
@@ -133,5 +146,6 @@ mod tests {
 
         assert!(!telemetry.is_enabled());
         assert!(telemetry.distinct_id.is_none());
+        assert!(telemetry.client.is_none());
     }
 }

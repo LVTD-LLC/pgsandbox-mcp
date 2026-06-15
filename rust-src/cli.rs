@@ -57,7 +57,7 @@ async fn start_server() -> anyhow::Result<()> {
 
 async fn setup(args: &[String]) -> anyhow::Result<u8> {
     let started = std::time::Instant::now();
-    let telemetry = Telemetry::new(crate::config::telemetry_config_from_env(std::env::vars()));
+    let telemetry = Telemetry::new(crate::config::load_telemetry_config());
     let options = parse_options(args)?;
     let client = parse_client(options.get("client").map(String::as_str).unwrap_or("codex"))?;
     let scope = parse_scope(options.get("scope").map(String::as_str).unwrap_or("user"))?;
@@ -92,7 +92,7 @@ async fn setup(args: &[String]) -> anyhow::Result<u8> {
     println!("Next: restart the MCP client, then run `pgsandbox-mcp doctor`.");
     telemetry
         .capture(
-            "pgsandbox cli command completed",
+            crate::telemetry::EVENT_CLI_COMMAND_COMPLETED,
             properties([
                 ("command", serde_json::json!("setup")),
                 ("client", serde_json::json!(client_selector_name(client))),
@@ -112,7 +112,7 @@ async fn setup(args: &[String]) -> anyhow::Result<u8> {
 
 async fn doctor(args: &[String]) -> anyhow::Result<u8> {
     let started = std::time::Instant::now();
-    let telemetry = Telemetry::new(crate::config::telemetry_config_from_env(std::env::vars()));
+    let telemetry = Telemetry::new(crate::config::load_telemetry_config());
     let options = parse_options(args)?;
     let cwd = std::env::current_dir()?;
     let result = run_doctor(options.get("admin-url").map(String::as_str), &cwd).await;
@@ -122,7 +122,7 @@ async fn doctor(args: &[String]) -> anyhow::Result<u8> {
     let code = if result.ok { 0 } else { 1 };
     telemetry
         .capture(
-            "pgsandbox cli command completed",
+            crate::telemetry::EVENT_CLI_COMMAND_COMPLETED,
             properties([
                 ("command", serde_json::json!("doctor")),
                 (
@@ -402,7 +402,7 @@ async fn smoke_test(args: &[String]) -> anyhow::Result<u8> {
     let success = result.is_ok();
     telemetry
         .capture(
-            "pgsandbox cli command completed",
+            crate::telemetry::EVENT_CLI_COMMAND_COMPLETED,
             properties([
                 ("command", serde_json::json!("smoke-test")),
                 (

@@ -152,6 +152,10 @@ pub fn find_profile<'a>(
         .ok_or_else(|| ConfigError::UnknownProfile(name.to_string()))
 }
 
+pub fn load_telemetry_config() -> TelemetryConfig {
+    telemetry_config_from_env(env::vars())
+}
+
 fn normalize_config(raw: RawConfig) -> Result<SandboxConfig, ConfigError> {
     if raw.profiles.is_empty() {
         return Err(ConfigError::MissingAdminUrl);
