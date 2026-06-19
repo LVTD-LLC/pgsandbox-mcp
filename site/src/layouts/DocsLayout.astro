@@ -35,7 +35,7 @@ const links = [
 
   .docs-nav {
     position: sticky;
-    top: 5.75rem;
+    top: calc(5.75rem + env(safe-area-inset-top));
     display: grid;
     min-width: 0;
     gap: 0.2rem;
@@ -46,7 +46,9 @@ const links = [
   }
 
   .docs-nav a {
-    display: block;
+    display: flex;
+    align-items: center;
+    min-height: var(--target-min);
     padding: 0.72rem 0.78rem;
     border-radius: var(--radius-md);
     color: var(--muted);
