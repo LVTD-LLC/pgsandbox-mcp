@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-06-19
+
+- Hardened the Astro site build by pinning Node 24.15.0 and upgrading to Astro 6 with explicit `overrides` for patched transitive build tooling: `esbuild`, `volar-service-yaml`, `yaml-language-server`, and `yaml`.
+- Improved site navigation accessibility with 44px minimum interactive targets, safe-area viewport handling, current-page state on the home link, and location state for the top-level docs link on nested docs pages.
+
 ## 2026-06-14
 
 - Added an auto-generated site changelog page sourced from `CHANGELOG.md` and linked it from the site footer.
