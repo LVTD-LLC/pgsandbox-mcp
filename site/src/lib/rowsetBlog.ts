@@ -2,6 +2,7 @@ import { createMarkdownProcessor } from '@astrojs/markdown-remark';
 
 const DEFAULT_ROWSET_API_BASE = 'https://rowset.lvtd.dev/api';
 const DEFAULT_BLOG_DATASET_KEY = '1e629b1a-89e5-4c56-8772-5c6ae5784753';
+const BLOG_SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 type RowsetRowsResponse = {
   rows?: RowsetRow[];
@@ -72,6 +73,10 @@ function tagsValue(input: string): string[] {
     .filter(Boolean);
 }
 
+function isBlogSlug(input: string): boolean {
+  return BLOG_SLUG_PATTERN.test(input);
+}
+
 function comparePosts(a: BlogPost, b: BlogPost): number {
   const dateCompare = b.publishedAt.localeCompare(a.publishedAt);
   if (dateCompare !== 0) {
@@ -86,7 +91,7 @@ async function rowToPost(row: RowsetRow): Promise<BlogPost | null> {
   const title = value(row, 'title');
   const bodyMarkdown = value(row, 'body_markdown');
 
-  if (!slug || !title || !bodyMarkdown || value(row, 'status') !== 'published') {
+  if (!isBlogSlug(slug) || !title || !bodyMarkdown || value(row, 'status') !== 'published') {
     return null;
   }
 
