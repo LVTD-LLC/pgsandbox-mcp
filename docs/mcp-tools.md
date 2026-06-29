@@ -122,6 +122,68 @@ Returns:
 
 - structured schema summary
 
+## `schema_digest`
+
+Returns a compact, checksumed schema summary for an experiment database. The
+checksum is based on schema objects, not the sandbox database id or name, so it
+can be compared across sandboxes.
+
+Inputs:
+
+- `profile`: optional Postgres profile name
+- `databaseId` or `databaseName`
+
+Returns:
+
+- `databaseId`
+- `databaseName`
+- `digestVersion`
+- `checksum`
+- object counts for tables, columns, indexes, and extensions
+- compact tables with column type/nullability and index definition hashes
+- extensions with versions
+
+## `schema_diff`
+
+Compares a prior `schema_digest` response with the current schema of an
+experiment database.
+
+Inputs:
+
+- `profile`: optional Postgres profile name
+- `databaseId` or `databaseName`
+- `baseDigest`: a previous `schema_digest` response
+
+Returns:
+
+- `beforeChecksum`
+- `afterChecksum`
+- `changed`
+- added and removed tables
+- changed tables with added, removed, or changed columns and indexes
+- added, removed, or changed extensions
+
+## `explain_query`
+
+Returns `EXPLAIN (FORMAT JSON)` for one SQL statement against an experiment
+database, plus a compact summary of node types, relations, cost, and estimated
+rows. The tool does not use `ANALYZE`; it rejects multi-statement SQL,
+transaction/session controls, and statements outside SELECT/WITH/VALUES/TABLE
+or DML forms that Postgres can plan without executing.
+
+Inputs:
+
+- `profile`: optional Postgres profile name
+- `databaseId` or `databaseName`
+- `sql`
+
+Returns:
+
+- `databaseId`
+- `databaseName`
+- `summary`
+- `plan`
+
 ## `list_databases`
 
 Lists active experiment databases.

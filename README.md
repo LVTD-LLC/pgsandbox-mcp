@@ -270,7 +270,8 @@ For multiple external Postgres versions or hosts, use profiles:
       "adminUrl": "postgres://postgres:postgres@localhost:6543/postgres",
       "databasePrefix": "pgsandbox",
       "defaultTtlMinutes": 240,
-      "maxTtlMinutes": 1440
+      "maxTtlMinutes": 1440,
+      "maxActiveDatabasesPerOwner": 3
     },
     {
       "name": "external-pg16",
@@ -285,6 +286,17 @@ Then run:
 ```bash
 export PGSANDBOX_CONFIG="./pgsandbox.config.json"
 pgsandbox-mcp
+```
+
+Profiles default to local admin URLs only: `localhost`, `127.0.0.1`, `::1`, or
+a URL without a host. To use a private remote Postgres host, opt in explicitly
+with either `"allowExternalAdminUrl": true` or an `"allowedAdminHosts"` list.
+The same policy is available for single-profile env setup:
+
+```bash
+export PGSANDBOX_ALLOW_EXTERNAL_ADMIN_URL=true
+export PGSANDBOX_ALLOWED_ADMIN_HOSTS="db.internal.example"
+export PGSANDBOX_MAX_ACTIVE_DATABASES_PER_OWNER=3
 ```
 
 ## Telemetry
@@ -335,6 +347,9 @@ V0 supports:
 - `get_connection_string`
 - `run_sql`
 - `describe_schema`
+- `schema_digest`
+- `schema_diff`
+- `explain_query`
 - `list_databases`
 - `cleanup_expired`
 
@@ -349,7 +364,8 @@ The service uses:
 - PG Sandbox-managed local Postgres cluster under `~/.pgsandbox/postgres` by default
 - local `initdb`, `pg_ctl`, and `postgres` binaries on `PATH` for the managed local runtime
 - optional explicit Postgres admin profiles with permission to create databases and roles
-- metadata table for ownership, TTL, encrypted sandbox credentials, and cleanup state
+- metadata and audit tables for ownership, TTL, encrypted sandbox credentials,
+  cleanup state, and lifecycle events
 - optional `pg_dump` and `pg_restore` on `PATH` for `clone_database`
 
 The local runtime stores its selected port, socket directory, data directory,
@@ -397,8 +413,12 @@ write` access to `LVTD-LLC/homebrew-tap`, or an equivalent classic PAT.
 - Agent-created users are not superusers.
 - Destructive tools only operate on resources created by this MCP.
 - Admin connections are used for lifecycle and metadata only.
+- Lifecycle events are recorded in the admin database audit table.
 - User SQL runs through generated sandbox credentials.
 - Sandbox role passwords are encrypted before being stored in metadata.
+- Non-local admin URLs require explicit profile opt-in or an allowed host list.
+- Profiles can cap active sandbox count per owner with
+  `maxActiveDatabasesPerOwner`.
 - Connection strings are returned only to the caller and are not logged in full.
 - The service should run locally or on a private network, not as a public internet-exposed admin surface.
 
