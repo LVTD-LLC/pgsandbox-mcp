@@ -425,7 +425,7 @@ impl PostgresSandboxManager {
                     ],
                 )
                 .await?;
-            record_audit_event(
+            let _ = record_audit_event(
                 &client,
                 "create_database",
                 &profile.name,
@@ -438,7 +438,7 @@ impl PostgresSandboxManager {
                     "expiresAt": expires_at,
                 }),
             )
-            .await?;
+            .await;
             anyhow::Ok(())
         }
         .await;
