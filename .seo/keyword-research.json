@@ -1,0 +1,151 @@
+{
+  "baseline": {
+    "domain_rating": null,
+    "source": "dataforseo keyword difficulty + conservative new-domain assumption",
+    "as_of": "2026-06-29",
+    "notes": "Treat as a low-authority/new site until backlink authority is measured. Prefer KD <= 15 unless a topic is strategically necessary."
+  },
+  "clusters": {
+    "postgres_mcp": {
+      "intent": "informational/commercial investigation",
+      "keywords": [
+        {
+          "keyword": "postgres mcp server",
+          "volume": 880,
+          "keyword_difficulty": 7,
+          "intent": "informational"
+        },
+        {
+          "keyword": "mcp postgres",
+          "volume": 210,
+          "keyword_difficulty": 6,
+          "intent": "navigational"
+        },
+        {
+          "keyword": "mcp database server",
+          "volume": 40,
+          "keyword_difficulty": 19,
+          "intent": "navigational"
+        },
+        {
+          "keyword": "database mcp server",
+          "volume": 70,
+          "keyword_difficulty": 16,
+          "intent": "informational"
+        }
+      ]
+    },
+    "database_sandboxes": {
+      "intent": "informational",
+      "keywords": [
+        {
+          "keyword": "database sandbox",
+          "volume": 90,
+          "keyword_difficulty": 15,
+          "intent": "informational"
+        },
+        {
+          "keyword": "sandbox database",
+          "volume": 90,
+          "keyword_difficulty": 7,
+          "intent": "informational"
+        },
+        {
+          "keyword": "postgres disposable database",
+          "volume": null,
+          "keyword_difficulty": null,
+          "intent": "emerging/zero-volume"
+        }
+      ]
+    },
+    "database_branching": {
+      "intent": "informational",
+      "keywords": [
+        {
+          "keyword": "database branching",
+          "volume": 210,
+          "keyword_difficulty": 9,
+          "intent": "informational"
+        },
+        {
+          "keyword": "postgres branching",
+          "volume": 40,
+          "keyword_difficulty": 0,
+          "intent": "informational"
+        },
+        {
+          "keyword": "database branching postgres",
+          "volume": 10,
+          "keyword_difficulty": null,
+          "intent": "informational"
+        }
+      ]
+    },
+    "postgres_cloning": {
+      "intent": "informational",
+      "keywords": [
+        {
+          "keyword": "postgres clone database",
+          "volume": 110,
+          "keyword_difficulty": 3,
+          "intent": "informational"
+        },
+        {
+          "keyword": "clone postgres database",
+          "volume": 30,
+          "keyword_difficulty": 7,
+          "intent": "informational"
+        },
+        {
+          "keyword": "clone database postgres",
+          "volume": 30,
+          "keyword_difficulty": 9,
+          "intent": "informational"
+        }
+      ]
+    },
+    "postgres_test_databases": {
+      "intent": "informational",
+      "keywords": [
+        {
+          "keyword": "postgres test database",
+          "volume": 20,
+          "keyword_difficulty": 2,
+          "intent": "informational"
+        },
+        {
+          "keyword": "test postgres database",
+          "volume": 20,
+          "keyword_difficulty": 2,
+          "intent": "informational"
+        }
+      ]
+    }
+  },
+  "candidates": [
+    {
+      "title": "Postgres MCP Server Safety Checklist for Coding Agents",
+      "target_keyword": "postgres mcp server",
+      "volume": 880,
+      "keyword_difficulty": 7,
+      "proposed_type": "guide",
+      "score": 22
+    },
+    {
+      "title": "Database Branching vs Disposable Postgres Sandboxes for Agent Workflows",
+      "target_keyword": "database branching",
+      "volume": 210,
+      "keyword_difficulty": 9,
+      "proposed_type": "comparison",
+      "score": 21
+    },
+    {
+      "title": "How to Clone a Postgres Database Into a Safe Disposable Sandbox",
+      "target_keyword": "postgres clone database",
+      "volume": 110,
+      "keyword_difficulty": 3,
+      "proposed_type": "how-to",
+      "score": 20
+    }
+  ]
+}
