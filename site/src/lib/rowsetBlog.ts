@@ -21,6 +21,13 @@ type RowsetRow = {
   data: Record<string, string>;
 };
 
+type HastNode = {
+  type?: string;
+  tagName?: string;
+  properties?: Record<string, unknown>;
+  children?: HastNode[];
+};
+
 export type BlogPost = {
   slug: string;
   title: string;
@@ -40,8 +47,80 @@ export type BlogPost = {
   sortOrder: number;
 };
 
+function isElement(node: HastNode, tagName: string): boolean {
+  return node.type === 'element' && node.tagName === tagName;
+}
+
+function findFirstElement(node: HastNode, tagName: string): HastNode | undefined {
+  if (isElement(node, tagName)) {
+    return node;
+  }
+
+  for (const child of node.children || []) {
+    const match = findFirstElement(child, tagName);
+
+    if (match) {
+      return match;
+    }
+  }
+
+  return undefined;
+}
+
+function tableColumnCount(table: HastNode): number {
+  const firstRow = findFirstElement(table, 'tr');
+
+  return (firstRow?.children || []).filter((child) => isElement(child, 'th') || isElement(child, 'td')).length;
+}
+
+function wrapMarkdownTables(node: HastNode): void {
+  if (!Array.isArray(node.children)) {
+    return;
+  }
+
+  node.children = node.children.map((child) => {
+    wrapMarkdownTables(child);
+
+    if (!isElement(child, 'table')) {
+      return child;
+    }
+
+    const frameClasses = ['markdown-table-frame'];
+
+    if (tableColumnCount(child) >= 3) {
+      frameClasses.push('markdown-table-frame-wide');
+    }
+
+    return {
+      type: 'element',
+      tagName: 'figure',
+      properties: { className: frameClasses },
+      children: [
+        {
+          type: 'element',
+          tagName: 'div',
+          properties: {
+            className: ['markdown-table-scroll'],
+            role: 'region',
+            ariaLabel: 'Scrollable table',
+            tabIndex: 0
+          },
+          children: [child]
+        }
+      ]
+    };
+  });
+}
+
+function rehypeResponsiveTables() {
+  return function transform(tree: HastNode): void {
+    wrapMarkdownTables(tree);
+  };
+}
+
 const markdownProcessor = createMarkdownProcessor({
   syntaxHighlight: false,
+  rehypePlugins: [rehypeResponsiveTables],
   remarkRehype: {
     allowDangerousHtml: false
   }
