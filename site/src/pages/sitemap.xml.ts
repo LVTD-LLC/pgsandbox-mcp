@@ -1,5 +1,5 @@
 import type { APIRoute } from 'astro';
-import { getPublishedBlogPosts } from '../lib/rowsetBlog';
+import { getBlogCanonicalUrl, getBlogSlug, getPublishedBlogPosts } from '../lib/blog';
 
 const staticPages = [
   '/',
@@ -16,7 +16,7 @@ async function getSitemapBlogPosts() {
   try {
     return await getPublishedBlogPosts();
   } catch (error) {
-    console.warn(`Skipping Rowset blog posts in sitemap: ${(error as Error).message}`);
+    console.warn(`Skipping blog posts in sitemap: ${(error as Error).message}`);
     return [];
   }
 }
@@ -52,12 +52,12 @@ export const GET: APIRoute = async ({ site }) => {
   const baseUrl = site ?? new URL('https://pgsandbox-mcp.cap.gregagi.com');
   const posts = await getSitemapBlogPosts();
   const latestPost = posts[0];
-  const latestLastmod = sitemapLastmod(latestPost?.updatedAt, latestPost?.publishedAt);
+  const latestLastmod = sitemapLastmod(latestPost?.data.updatedAt, latestPost?.data.publishedAt);
   const pages = [
     ...staticPages.map((path) => ({ path, lastmod: latestLastmod })),
     ...posts.map((post) => ({
-      path: post.canonicalUrl || `/blog/${post.slug}/`,
-      lastmod: sitemapLastmod(post.updatedAt, post.publishedAt)
+      path: getBlogCanonicalUrl(post, baseUrl) || `/blog/${getBlogSlug(post)}/`,
+      lastmod: sitemapLastmod(post.data.updatedAt, post.data.publishedAt)
     }))
   ];
 

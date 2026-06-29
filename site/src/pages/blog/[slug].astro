@@ -1,12 +1,21 @@
 ---
 import BaseLayout from '../../layouts/BaseLayout.astro';
-import { blogAuthor, getPublishedBlogPosts, type BlogPost } from '../../lib/rowsetBlog';
+import { render } from 'astro:content';
+import {
+  blogAuthor,
+  getBlogCanonicalUrl,
+  getBlogDescription,
+  getBlogSlug,
+  getBlogTitle,
+  getPublishedBlogPosts,
+  type BlogPost
+} from '../../lib/blog';
 
 export async function getStaticPaths() {
   const posts = await getPublishedBlogPosts();
 
   return posts.map((post) => ({
-    params: { slug: post.slug },
+    params: { slug: getBlogSlug(post) },
     props: { post }
   }));
 }
@@ -16,8 +25,9 @@ type Props = {
 };
 
 const { post } = Astro.props;
-const description = post.metaDescription || post.excerpt;
-const canonicalUrl = post.canonicalUrl || new URL(`/blog/${post.slug}/`, Astro.site || Astro.url.origin).toString();
+const { Content } = await render(post);
+const description = getBlogDescription(post);
+const canonicalUrl = getBlogCanonicalUrl(post, Astro.site || Astro.url);
 
 function toArticleTime(value: string) {
   const trimmed = value.trim();
@@ -31,12 +41,12 @@ function toArticleTime(value: string) {
   return Number.isNaN(date.valueOf()) ? undefined : date.toISOString();
 }
 
-const publishedTime = toArticleTime(post.publishedAt);
-const modifiedTime = toArticleTime(post.updatedAt || post.publishedAt) || publishedTime;
+const publishedTime = toArticleTime(post.data.publishedAt);
+const modifiedTime = toArticleTime(post.data.updatedAt || post.data.publishedAt) || publishedTime;
 const structuredData = {
   '@context': 'https://schema.org',
   '@type': 'BlogPosting',
-  headline: post.title,
+  headline: post.data.title,
   description,
   ...(publishedTime ? { datePublished: publishedTime } : {}),
   ...(modifiedTime ? { dateModified: modifiedTime } : {}),
@@ -60,14 +70,14 @@ const structuredData = {
     name: 'PGSandbox MCP',
     url: new URL('/', Astro.site || Astro.url.origin).toString()
   },
-  keywords: post.tags.join(', ')
+  keywords: post.data.tags.join(', ')
 };
 ---
 <BaseLayout
-  title={`${post.metaTitle} - PGSandbox MCP`}
+  title={`${getBlogTitle(post)} - PGSandbox MCP`}
   description={description}
   canonicalUrl={canonicalUrl}
-  imageUrl={post.heroImageUrl}
+  imageUrl={post.data.heroImageUrl}
   ogType="article"
   articlePublishedTime={publishedTime}
   articleModifiedTime={modifiedTime}
@@ -79,23 +89,25 @@ const structuredData = {
       <header class="blog-post-header">
         <a class="text-link" href="/blog/">Back to blog</a>
         <div class="post-meta">
-          <span>{post.category || 'Engineering'}</span>
-          <time datetime={post.publishedAt}>{post.publishedAt}</time>
+          <span>{post.data.category || 'Engineering'}</span>
+          <time datetime={post.data.publishedAt}>{post.data.publishedAt}</time>
         </div>
-        <h1>{post.title}</h1>
-        <p>{post.excerpt}</p>
+        <h1>{post.data.title}</h1>
+        <p>{post.data.excerpt}</p>
         <p class="byline">
           By <a href={blogAuthor.url}>{blogAuthor.name}</a> with OpenAI Codex.
         </p>
-        {post.heroImageUrl && <img class="hero-image" src={post.heroImageUrl} alt="" loading="eager" />}
-        {post.tags.length > 0 && (
+        {post.data.heroImageUrl && <img class="hero-image" src={post.data.heroImageUrl} alt="" loading="eager" />}
+        {post.data.tags.length > 0 && (
           <div class="tag-list" aria-label="Tags">
-            {post.tags.map((tag) => <span>{tag}</span>)}
+            {post.data.tags.map((tag) => <span>{tag}</span>)}
           </div>
         )}
       </header>
 
-      <div class="blog-content" set:html={post.bodyHtml} />
+      <div class="blog-content">
+        <Content />
+      </div>
     </article>
   </main>
 </BaseLayout>
@@ -224,6 +236,7 @@ const structuredData = {
     padding-left: 1.25rem;
   }
 
+  /* Markdown tables are wrapped by rehypeResponsiveTables in a focusable scroll region. */
   .blog-content :global(.markdown-table-frame) {
     margin: 2rem 0 2.35rem;
   }
