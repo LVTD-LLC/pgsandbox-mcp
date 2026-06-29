@@ -919,6 +919,7 @@ impl PostgresSandboxManager {
 
             match deletion {
                 Ok(()) => {
+                    deleted.push(record.database_id.clone());
                     let _ = record_audit_event(
                         &client,
                         "cleanup_expired",
@@ -929,7 +930,6 @@ impl PostgresSandboxManager {
                         json!({ "expiresAt": record.expires_at }),
                     )
                     .await;
-                    deleted.push(record.database_id);
                 }
                 Err(error) => {
                     let message = error.to_string();
@@ -1159,20 +1159,7 @@ async fn enforce_owner_quota(
     };
 
     let row = client
-        .query_one(
-            &format!(
-                r#"
-                  SELECT count(*)::bigint AS active_count
-                  FROM {}
-                  WHERE profile_name = $1
-                    AND owner = $2
-                    AND deleted_at IS NULL
-                    AND expires_at > now()
-                "#,
-                quote_ident(METADATA_TABLE)?
-            ),
-            &[&profile.name, &owner],
-        )
+        .query_one(&active_owner_quota_sql()?, &[&profile.name, &owner])
         .await?;
     let active_count = row.get::<_, i64>("active_count");
     if active_count >= i64::from(limit) {
@@ -1183,6 +1170,20 @@ async fn enforce_owner_quota(
     }
 
     Ok(())
+}
+
+fn active_owner_quota_sql() -> anyhow::Result<String> {
+    Ok(format!(
+        r#"
+          SELECT count(*)::bigint AS active_count
+          FROM {}
+          WHERE profile_name = $1
+            AND owner = $2
+            AND deleted_at IS NULL
+            AND expires_at > now()
+        "#,
+        quote_ident(METADATA_TABLE)?
+    ))
 }
 
 async fn find_record(
@@ -2760,6 +2761,14 @@ mod tests {
         let error = diff_schema_digests(&before, &after).unwrap_err();
 
         assert!(error.to_string().contains("schema digest versions differ"));
+    }
+
+    #[test]
+    fn owner_quota_counts_only_unexpired_active_databases() {
+        let sql = active_owner_quota_sql().unwrap();
+
+        assert!(sql.contains("deleted_at IS NULL"));
+        assert!(sql.contains("expires_at > now()"));
     }
 
     #[test]

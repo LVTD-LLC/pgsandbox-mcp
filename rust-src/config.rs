@@ -276,7 +276,12 @@ fn validate_admin_url_policy(profile: &SandboxProfile) -> Result<(), ConfigError
         .map(|host| host.trim_matches(['[', ']']).to_ascii_lowercase())
         .collect::<Vec<_>>();
 
-    if host.is_none() {
+    let is_local =
+        is_local_admin_url(&profile.admin_url).map_err(|source| ConfigError::InvalidAdminUrl {
+            profile: profile.name.clone(),
+            source,
+        })?;
+    if is_local {
         return Ok(());
     }
 
@@ -295,12 +300,7 @@ fn validate_admin_url_policy(profile: &SandboxProfile) -> Result<(), ConfigError
         }
     }
 
-    let is_local =
-        is_local_admin_url(&profile.admin_url).map_err(|source| ConfigError::InvalidAdminUrl {
-            profile: profile.name.clone(),
-            source,
-        })?;
-    if is_local || profile.allow_external_admin_url || !normalized_allowed_hosts.is_empty() {
+    if profile.allow_external_admin_url || !normalized_allowed_hosts.is_empty() {
         return Ok(());
     }
 
