@@ -155,6 +155,7 @@ impl LocalPostgresCluster {
 
         let original_config = config.clone();
         config = start_config_for_available_port(config, port_available, select_free_port)?;
+        ensure_postgres_binary("pg_ctl")?;
         fs::create_dir_all(&config.socket_dir).with_context(|| {
             format!(
                 "failed to create local Postgres socket directory {}",
@@ -162,8 +163,11 @@ impl LocalPostgresCluster {
             )
         })?;
         write_postgres_runtime_config(&config)?;
+        if let Err(error) = self.write_config(&config) {
+            self.restore_start_config(&original_config);
+            return Err(error);
+        }
 
-        ensure_postgres_binary("pg_ctl")?;
         if let Err(error) = command_status(
             "pg_ctl",
             Command::new("pg_ctl")
@@ -175,16 +179,15 @@ impl LocalPostgresCluster {
                 .arg("start")
                 .status(),
         ) {
-            let _ = write_postgres_runtime_config(&original_config);
+            self.restore_start_config(&original_config);
             return Err(error);
         }
 
         if !self.is_running()? {
-            let _ = write_postgres_runtime_config(&original_config);
+            self.restore_start_config(&original_config);
             anyhow::bail!("local Postgres did not report healthy after pg_ctl start");
         }
 
-        self.write_config(&config)?;
         Ok(config)
     }
 
@@ -308,11 +311,16 @@ impl LocalPostgresCluster {
 
     fn write_config(&self, config: &LocalClusterConfig) -> anyhow::Result<()> {
         let path = self.config_path();
-        write_private_file(
+        write_private_file_atomically(
             &path,
             &format!("{}\n", serde_json::to_string_pretty(config)?),
         )
         .with_context(|| format!("failed to write local Postgres config {}", path.display()))
+    }
+
+    fn restore_start_config(&self, config: &LocalClusterConfig) {
+        let _ = write_postgres_runtime_config(config);
+        let _ = self.write_config(config);
     }
 
     fn is_running(&self) -> anyhow::Result<bool> {
@@ -455,6 +463,41 @@ fn summarize_stderr(stderr: &[u8]) -> String {
 
 fn write_password_file(path: &Path, password: &str) -> anyhow::Result<()> {
     write_private_file(path, &format!("{password}\n"))
+}
+
+fn write_private_file_atomically(path: &Path, content: &str) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create private local Postgres file directory {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let temporary_path = temporary_private_file_path(path);
+    let result = write_private_file(&temporary_path, content).and_then(|()| {
+        fs::rename(&temporary_path, path).with_context(|| {
+            format!(
+                "failed to replace private local Postgres file {}",
+                path.display()
+            )
+        })
+    });
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+
+    result
+}
+
+fn temporary_private_file_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_else(|| "local-postgres".into());
+    path.with_file_name(format!(".{file_name}.{}.tmp", Uuid::new_v4().simple()))
 }
 
 fn write_private_file(path: &Path, content: &str) -> anyhow::Result<()> {
@@ -648,5 +691,48 @@ mod tests {
             updated.admin_url,
             "postgres://pgsandbox_admin:secret@127.0.0.1:65433/postgres?sslmode=disable"
         );
+    }
+
+    #[test]
+    fn restore_start_config_reverts_runtime_config_and_saved_json() {
+        let directory = tempfile::tempdir().unwrap();
+        let cluster = LocalPostgresCluster::new(directory.path());
+        fs::create_dir_all(cluster.data_dir()).unwrap();
+        fs::write(
+            cluster.data_dir().join("postgresql.conf"),
+            "# base config\n",
+        )
+        .unwrap();
+
+        let original = cluster.config_for_port(65432, "secret");
+        let updated = cluster.config_for_port(65433, "secret");
+        write_postgres_runtime_config(&updated).unwrap();
+        cluster.write_config(&updated).unwrap();
+
+        cluster.restore_start_config(&original);
+
+        assert_eq!(cluster.read_config().unwrap(), original);
+        let postgres_conf = fs::read_to_string(cluster.data_dir().join("postgresql.conf")).unwrap();
+        assert!(postgres_conf.contains("port = 65432"));
+        assert!(!postgres_conf.contains("port = 65433"));
+    }
+
+    #[test]
+    fn atomic_config_write_replaces_previous_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let cluster = LocalPostgresCluster::new(directory.path());
+        let original = cluster.config_for_port(65432, "secret");
+        let updated = cluster.config_for_port(65433, "secret");
+
+        cluster.write_config(&original).unwrap();
+        cluster.write_config(&updated).unwrap();
+
+        assert_eq!(cluster.read_config().unwrap(), updated);
+        let leftovers = fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp"))
+            .count();
+        assert_eq!(leftovers, 0);
     }
 }
