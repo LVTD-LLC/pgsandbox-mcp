@@ -123,15 +123,21 @@ where
             })?,
         )?
     } else {
-        let (admin_url, default_name) = match env.get("PGSANDBOX_ADMIN_DATABASE_URL") {
-            Some(admin_url) => (admin_url.to_string(), "default"),
-            None => (local_admin_url()?, LOCAL_PROFILE_NAME),
+        let explicit_default_profile = env.get("PGSANDBOX_DEFAULT_PROFILE").cloned();
+        let (admin_url, name) = match env.get("PGSANDBOX_ADMIN_DATABASE_URL") {
+            Some(admin_url) => (
+                admin_url.to_string(),
+                explicit_default_profile.unwrap_or_else(|| "default".to_string()),
+            ),
+            None => {
+                let default_profile =
+                    explicit_default_profile.unwrap_or_else(|| LOCAL_PROFILE_NAME.to_string());
+                if default_profile != LOCAL_PROFILE_NAME {
+                    return Err(ConfigError::MissingDefaultProfile(default_profile));
+                }
+                (local_admin_url()?, LOCAL_PROFILE_NAME.to_string())
+            }
         };
-
-        let name = env
-            .get("PGSANDBOX_DEFAULT_PROFILE")
-            .cloned()
-            .unwrap_or_else(|| default_name.to_string());
 
         normalize_config(RawConfig {
             default_profile: Some(name.clone()),
@@ -354,6 +360,17 @@ mod tests {
             config.profiles[0].admin_url,
             "postgres://postgres:postgres@localhost/postgres"
         );
+    }
+
+    #[test]
+    fn default_profile_without_admin_url_does_not_alias_local_profile() {
+        let err =
+            load_config_from_env_with_local([("PGSANDBOX_DEFAULT_PROFILE", "staging")], || {
+                panic!("local cluster should not start for an undefined requested profile")
+            })
+            .unwrap_err();
+
+        assert!(err.to_string().contains("default profile does not exist"));
     }
 
     #[test]

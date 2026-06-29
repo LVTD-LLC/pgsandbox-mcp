@@ -15,6 +15,7 @@ pub const LOCAL_PROFILE_NAME: &str = "local";
 const ADMIN_USER: &str = "pgsandbox_admin";
 const CONFIG_FILE_NAME: &str = "local-postgres.json";
 const DATA_DIR: &str = "postgres/data";
+const LOCK_FILE_NAME: &str = "local-postgres.lock";
 const LOG_FILE: &str = "postgres/postgres.log";
 const PASSWORD_FILE: &str = "postgres/initdb-password";
 const SOCKET_DIR: &str = "postgres/run";
@@ -47,6 +48,10 @@ pub struct LocalClusterStatus {
     pub config: Option<LocalClusterConfig>,
 }
 
+struct LocalClusterLock {
+    _file: fs::File,
+}
+
 impl LocalPostgresCluster {
     pub fn from_env() -> anyhow::Result<Self> {
         let root = match std::env::var_os("PGSANDBOX_HOME") {
@@ -71,14 +76,24 @@ impl LocalPostgresCluster {
     }
 
     pub fn ensure_started(&self) -> anyhow::Result<LocalClusterConfig> {
-        let initialized = self.init()?;
+        let _lock = self.acquire_lock()?;
+        self.ensure_started_locked()
+    }
+
+    fn ensure_started_locked(&self) -> anyhow::Result<LocalClusterConfig> {
+        let initialized = self.init_locked()?;
         if self.is_running()? {
             return Ok(initialized);
         }
-        self.start()
+        self.start_locked()
     }
 
     pub fn init(&self) -> anyhow::Result<LocalClusterConfig> {
+        let _lock = self.acquire_lock()?;
+        self.init_locked()
+    }
+
+    fn init_locked(&self) -> anyhow::Result<LocalClusterConfig> {
         if self.data_dir().join("PG_VERSION").exists() {
             return self.read_config();
         }
@@ -128,13 +143,18 @@ impl LocalPostgresCluster {
     }
 
     pub fn start(&self) -> anyhow::Result<LocalClusterConfig> {
-        let mut config = self.init()?;
+        let _lock = self.acquire_lock()?;
+        self.start_locked()
+    }
+
+    fn start_locked(&self) -> anyhow::Result<LocalClusterConfig> {
+        let mut config = self.init_locked()?;
         if self.is_running()? {
             return Ok(config);
         }
 
-        config.port = select_free_port()?;
-        config.admin_url = admin_url_for(config.port, &admin_password_from_url(&config.admin_url)?);
+        let original_config = config.clone();
+        config = start_config_for_available_port(config, port_available, select_free_port)?;
         fs::create_dir_all(&config.socket_dir).with_context(|| {
             format!(
                 "failed to create local Postgres socket directory {}",
@@ -142,10 +162,9 @@ impl LocalPostgresCluster {
             )
         })?;
         write_postgres_runtime_config(&config)?;
-        self.write_config(&config)?;
 
         ensure_postgres_binary("pg_ctl")?;
-        command_status(
+        if let Err(error) = command_status(
             "pg_ctl",
             Command::new("pg_ctl")
                 .arg("-D")
@@ -155,16 +174,26 @@ impl LocalPostgresCluster {
                 .arg("-w")
                 .arg("start")
                 .status(),
-        )?;
+        ) {
+            let _ = write_postgres_runtime_config(&original_config);
+            return Err(error);
+        }
 
         if !self.is_running()? {
+            let _ = write_postgres_runtime_config(&original_config);
             anyhow::bail!("local Postgres did not report healthy after pg_ctl start");
         }
 
-        self.read_config()
+        self.write_config(&config)?;
+        Ok(config)
     }
 
     pub fn stop(&self) -> anyhow::Result<()> {
+        let _lock = self.acquire_lock()?;
+        self.stop_locked()
+    }
+
+    fn stop_locked(&self) -> anyhow::Result<()> {
         if !self.data_dir().join("PG_VERSION").exists() {
             return Ok(());
         }
@@ -187,6 +216,11 @@ impl LocalPostgresCluster {
     }
 
     pub fn status(&self) -> anyhow::Result<LocalClusterStatus> {
+        let _lock = self.acquire_lock()?;
+        self.status_locked()
+    }
+
+    fn status_locked(&self) -> anyhow::Result<LocalClusterStatus> {
         let initialized = self.data_dir().join("PG_VERSION").exists();
         if !initialized {
             return Ok(LocalClusterStatus {
@@ -224,8 +258,32 @@ impl LocalPostgresCluster {
         self.root.join(LOG_FILE)
     }
 
+    fn lock_path(&self) -> PathBuf {
+        self.root.join(LOCK_FILE_NAME)
+    }
+
     fn password_file(&self) -> PathBuf {
         self.root.join(PASSWORD_FILE)
+    }
+
+    fn acquire_lock(&self) -> anyhow::Result<LocalClusterLock> {
+        fs::create_dir_all(&self.root).with_context(|| {
+            format!(
+                "failed to create local Postgres root directory {}",
+                self.root.display()
+            )
+        })?;
+        let path = self.lock_path();
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("failed to open local Postgres lock {}", path.display()))?;
+        file.lock()
+            .with_context(|| format!("failed to lock local Postgres state {}", path.display()))?;
+        Ok(LocalClusterLock { _file: file })
     }
 
     fn read_config(&self) -> anyhow::Result<LocalClusterConfig> {
@@ -300,6 +358,24 @@ fn select_free_port() -> anyhow::Result<u16> {
 
 fn port_available(port: u16) -> bool {
     TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+fn start_config_for_available_port<F, S>(
+    mut config: LocalClusterConfig,
+    available: F,
+    select: S,
+) -> anyhow::Result<LocalClusterConfig>
+where
+    F: FnOnce(u16) -> bool,
+    S: FnOnce() -> anyhow::Result<u16>,
+{
+    if available(config.port) {
+        return Ok(config);
+    }
+
+    config.port = select()?;
+    config.admin_url = admin_url_for(config.port, &admin_password_from_url(&config.admin_url)?);
+    Ok(config)
 }
 
 fn admin_password_from_url(admin_url: &str) -> anyhow::Result<String> {
@@ -525,5 +601,52 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn local_cluster_lock_is_exclusive() {
+        let directory = tempfile::tempdir().unwrap();
+        let cluster = LocalPostgresCluster::new(directory.path());
+        let _lock = cluster.acquire_lock().unwrap();
+        let second = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(cluster.lock_path())
+            .unwrap();
+
+        assert!(second.try_lock().is_err());
+    }
+
+    #[test]
+    fn start_config_reuses_saved_port_when_available() {
+        let directory = tempfile::tempdir().unwrap();
+        let cluster = LocalPostgresCluster::new(directory.path());
+        let config = cluster.config_for_port(65432, "secret");
+
+        let updated = start_config_for_available_port(
+            config.clone(),
+            |_| true,
+            || anyhow::bail!("should not select another port"),
+        )
+        .unwrap();
+
+        assert_eq!(updated, config);
+    }
+
+    #[test]
+    fn start_config_updates_admin_url_when_saved_port_is_unavailable() {
+        let directory = tempfile::tempdir().unwrap();
+        let cluster = LocalPostgresCluster::new(directory.path());
+        let config = cluster.config_for_port(65432, "secret");
+
+        let updated = start_config_for_available_port(config, |_| false, || Ok(65433)).unwrap();
+
+        assert_eq!(updated.port, 65433);
+        assert_eq!(
+            updated.admin_url,
+            "postgres://pgsandbox_admin:secret@127.0.0.1:65433/postgres?sslmode=disable"
+        );
     }
 }
