@@ -23,7 +23,7 @@
 | --- | --- | --- | --- |
 | /blog/ | Blog index | PGSandbox blog; database agent workflow posts; safe Postgres agent workflows | Blog hub. |
 | /blog/disposable-postgres-for-ai-agents/ | Disposable Postgres Databases for AI Agent Workflows | disposable Postgres databases; AI agent database workflows; isolated Postgres databases for agents | Existing published Rowset post; exclude duplicate topic. |
-| /blog/postgres-mcp-server-safety-checklist/ | Postgres MCP Server Safety Checklist for Coding Agents | Postgres MCP server safety checklist; safe Postgres MCP server; MCP database safety checklist; database access checklist for coding agents | Rowset row 1578; currently `review`, publish after human approval and inbound links. |
+| /blog/postgres-mcp-server-safety-checklist/ | Postgres MCP Server Safety Checklist for Coding Agents | Postgres MCP server safety checklist; safe Postgres MCP server; MCP database safety checklist; database access checklist for coding agents | Rowset row 1578; status `published`. |
 
 ## Changelog
 

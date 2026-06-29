@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-06-29
+
+- Added the initial SEO content foundation with brand guidance, Rowset blog configuration, internal link inventory, keyword research baseline, and candidate backlog for future PGSandbox MCP blog posts.
+
 ## 2026-06-19
 
 - Hardened the Astro site build by pinning Node 24.15.0 and upgrading to Astro 6 with explicit `overrides` for patched transitive build tooling: `esbuild`, `volar-service-yaml`, `yaml-language-server`, and `yaml`.

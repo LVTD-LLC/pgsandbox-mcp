@@ -5,12 +5,7 @@
 | Date | Type | Title | Slug | Target Keyword | Primary Internal Links | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | 2026-06-28 | Blog post | Disposable Postgres Databases for AI Agent Workflows | disposable-postgres-for-ai-agents | disposable Postgres databases for AI agents | /, /docs/mcp-tools/, /docs/architecture/ | Existing Rowset post; do not duplicate. |
-
-## In Review
-
-| Date | Type | Title | Slug | Target Keyword | Primary Internal Links | Notes |
-| --- | --- | --- | --- | --- | --- | --- |
-| 2026-06-29 | Guide / checklist | Postgres MCP Server Safety Checklist for Coding Agents | postgres-mcp-server-safety-checklist | postgres mcp server | /, /docs/mcp-tools/, /docs/architecture/, /blog/disposable-postgres-for-ai-agents/ | Rowset row 1578, status `review`. Add inbound links before publishing. |
+| 2026-06-29 | Guide / checklist | Postgres MCP Server Safety Checklist for Coding Agents | postgres-mcp-server-safety-checklist | postgres mcp server | /, /docs/mcp-tools/, /docs/architecture/, /blog/disposable-postgres-for-ai-agents/ | Rowset row 1578, status `published`. |
 
 ## Candidate Backlog
 

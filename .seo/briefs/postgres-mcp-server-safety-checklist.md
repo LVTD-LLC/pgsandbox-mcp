@@ -66,8 +66,6 @@ Gap:
 
 ## Draft Body
 
-# Postgres MCP Server Safety Checklist for Coding Agents
-
 A Postgres MCP server is safe enough for coding agents only when three things are true: the MCP server exposes a narrow tool surface, the Postgres credentials have a small blast radius, and every task database has a cleanup path. If any one of those is missing, the agent may still be useful, but the database access is running on trust instead of control.
 
 Model Context Protocol (MCP) gives AI applications a standard way to connect to external systems, including databases and tools. The official MCP docs describe it as a way for AI apps like Claude or ChatGPT to connect to data sources, tools, and workflows (https://modelcontextprotocol.io/docs/getting-started/intro). That is exactly why Postgres MCP servers are useful: they let an agent inspect schema, run SQL, validate migrations, or debug backend behavior against real Postgres instead of guessing from code.
