@@ -1,6 +1,6 @@
 ---
 import BaseLayout from '../../layouts/BaseLayout.astro';
-import { blogAuthor, getPublishedBlogPosts } from '../../lib/rowsetBlog';
+import { blogAuthor, getBlogCanonicalUrl, getBlogDescription, getBlogSlug, getPublishedBlogPosts } from '../../lib/blog';
 
 const posts = await getPublishedBlogPosts();
 const featuredPost = posts[0];
@@ -38,16 +38,16 @@ const structuredData = {
     }
   ],
   blogPost: posts.map((post) => {
-    const datePublished = toSchemaDateTime(post.publishedAt);
-    const dateModified = toSchemaDateTime(post.updatedAt || post.publishedAt) || datePublished;
+    const datePublished = toSchemaDateTime(post.data.publishedAt);
+    const dateModified = toSchemaDateTime(post.data.updatedAt || post.data.publishedAt) || datePublished;
 
     return {
       '@type': 'BlogPosting',
-      headline: post.title,
-      description: post.metaDescription || post.excerpt,
+      headline: post.data.title,
+      description: getBlogDescription(post),
       ...(datePublished ? { datePublished } : {}),
       ...(dateModified ? { dateModified } : {}),
-      url: post.canonicalUrl || new URL(`/blog/${post.slug}/`, Astro.site || Astro.url.origin).toString()
+      url: getBlogCanonicalUrl(post, Astro.site || Astro.url)
     };
   })
 };
@@ -73,15 +73,15 @@ const structuredData = {
         <article class="featured-post">
           <span class="featured-label">Latest post</span>
           <div class="post-meta">
-            <span>{featuredPost.category || 'Engineering'}</span>
-            <time datetime={featuredPost.publishedAt}>{featuredPost.publishedAt}</time>
+            <span>{featuredPost.data.category || 'Engineering'}</span>
+            <time datetime={featuredPost.data.publishedAt}>{featuredPost.data.publishedAt}</time>
           </div>
           <h2>
-            <a href={`/blog/${featuredPost.slug}/`}>{featuredPost.title}</a>
+            <a href={`/blog/${getBlogSlug(featuredPost)}/`}>{featuredPost.data.title}</a>
           </h2>
-          <p>{featuredPost.excerpt}</p>
+          <p>{featuredPost.data.excerpt}</p>
           <div class="tag-list" aria-label="Tags">
-            {featuredPost.tags.map((tag) => <span>{tag}</span>)}
+            {featuredPost.data.tags.map((tag) => <span>{tag}</span>)}
           </div>
         </article>
       ) : (
@@ -93,13 +93,13 @@ const structuredData = {
           {remainingPosts.map((post) => (
             <article class="post-card">
               <div class="post-meta">
-                <span>{post.category || 'Engineering'}</span>
-                <time datetime={post.publishedAt}>{post.publishedAt}</time>
+                <span>{post.data.category || 'Engineering'}</span>
+                <time datetime={post.data.publishedAt}>{post.data.publishedAt}</time>
               </div>
               <h2>
-                <a href={`/blog/${post.slug}/`}>{post.title}</a>
+                <a href={`/blog/${getBlogSlug(post)}/`}>{post.data.title}</a>
               </h2>
-              <p>{post.excerpt}</p>
+              <p>{post.data.excerpt}</p>
             </article>
           ))}
         </div>
