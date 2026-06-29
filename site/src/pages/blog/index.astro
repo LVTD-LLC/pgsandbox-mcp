@@ -1,14 +1,44 @@
 ---
 import BaseLayout from '../../layouts/BaseLayout.astro';
-import { getPublishedBlogPosts } from '../../lib/rowsetBlog';
+import { blogAuthor, getPublishedBlogPosts } from '../../lib/rowsetBlog';
 
 const posts = await getPublishedBlogPosts();
-const featuredPost = posts.find((post) => post.featured) || posts[0];
-const remainingPosts = featuredPost ? posts.filter((post) => post.slug !== featuredPost.slug) : posts;
+const featuredPost = posts[0];
+const remainingPosts = featuredPost ? posts.slice(1) : posts;
+const canonicalUrl = new URL('/blog/', Astro.site || Astro.url.origin).toString();
+const description = 'Notes on safe disposable Postgres databases, MCP workflows, and agent-driven backend development.';
+const structuredData = {
+  '@context': 'https://schema.org',
+  '@type': 'Blog',
+  name: 'PGSandbox MCP Blog',
+  description,
+  url: canonicalUrl,
+  author: [
+    {
+      '@type': 'Person',
+      name: blogAuthor.name,
+      url: blogAuthor.url
+    },
+    {
+      '@type': 'Organization',
+      name: 'OpenAI Codex'
+    }
+  ],
+  blogPost: posts.map((post) => ({
+    '@type': 'BlogPosting',
+    headline: post.title,
+    description: post.metaDescription || post.excerpt,
+    datePublished: post.publishedAt,
+    dateModified: post.updatedAt || post.publishedAt,
+    url: post.canonicalUrl || new URL(`/blog/${post.slug}/`, Astro.site || Astro.url.origin).toString()
+  }))
+};
 ---
 <BaseLayout
   title="Blog - PGSandbox MCP"
-  description="Notes on safe disposable Postgres databases, MCP workflows, and agent-driven backend development."
+  description={description}
+  canonicalUrl={canonicalUrl}
+  structuredData={structuredData}
 >
   <main id="content" class="blog-index">
     <section class="container blog-hero">
@@ -23,6 +53,7 @@ const remainingPosts = featuredPost ? posts.filter((post) => post.slug !== featu
     <section class="container blog-list-section" aria-label="Published posts">
       {featuredPost ? (
         <article class="featured-post">
+          <span class="featured-label">Latest post</span>
           <div class="post-meta">
             <span>{featuredPost.category || 'Engineering'}</span>
             <time datetime={featuredPost.publishedAt}>{featuredPost.publishedAt}</time>
@@ -96,6 +127,15 @@ const remainingPosts = featuredPost ? posts.filter((post) => post.slug !== featu
 
   .featured-post {
     padding: clamp(1.4rem, 4vw, 2.4rem);
+  }
+
+  .featured-label {
+    display: inline-flex;
+    margin-bottom: 0.85rem;
+    color: var(--primary);
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    font-weight: 760;
   }
 
   .featured-post h2,
