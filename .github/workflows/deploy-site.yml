@@ -28,10 +28,16 @@ jobs:
         run: node scripts/check-site-changelog.mjs
       - name: Build site
         working-directory: site
-        run: npm run build
+        env:
+          ROWSET_API_KEY: ${{ secrets.ROWSET_API_KEY }}
+          PGSANDBOX_BLOG_ROWSET_DATASET_KEY: 1e629b1a-89e5-4c56-8772-5c6ae5784753
+          PGSANDBOX_BLOG_ROWSET_API_BASE: https://rowset.lvtd.dev/api
+        run: |
+          test -n "$ROWSET_API_KEY"
+          npm run build
       - name: Package site for CapRover
         working-directory: site
-        run: tar --exclude=dist --exclude=node_modules -czf /tmp/pgsandbox-mcp-site.tar.gz .
+        run: tar --exclude=node_modules -czf /tmp/pgsandbox-mcp-site.tar.gz .
       - name: Deploy to CapRover
         env:
           CAPROVER_URL: ${{ secrets.CAPROVER_PGSANDBOX_SITE_URL }}
