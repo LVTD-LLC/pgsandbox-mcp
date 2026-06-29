@@ -2,6 +2,7 @@
 
 ## 2026-06-29
 
+- Added the Postgres database cloning sandbox guide and wired inbound links from existing blog posts.
 - Added a site build check for accessible Markdown table scroll wrappers on blog posts.
 - Added a site content check that requires explicit blog post publication status.
 - Moved the two published site blog posts out of Rowset and into Astro-managed Markdown content files.

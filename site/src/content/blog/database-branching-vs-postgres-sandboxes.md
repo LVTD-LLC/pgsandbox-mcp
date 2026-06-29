@@ -151,7 +151,7 @@ Different branching platforms answer that differently. Neon and Xata-style copy-
 
 Disposable sandboxes have the same data question, but the lifecycle is explicit. PGSandbox's clone backend creates an empty sandbox, runs `pg_dump` against the source database with ownership and privileges omitted, and streams the dump into `pg_restore` connected as the sandbox role. The PostgreSQL docs describe [`pg_dump`](https://www.postgresql.org/docs/current/app-pgdump.html) as exporting a single database and making consistent backups without blocking readers or writers, while [`pg_restore`](https://www.postgresql.org/docs/current/app-pgrestore.html) restores archives created by `pg_dump`.
 
-That clone path is useful when an agent needs realistic database shape. It is not a permission slip to hand production data to an agent. If the source has sensitive data, use masking, reduction, explicit approval, or a non-production source before the restore.
+That clone path is useful when an agent needs realistic database shape. It is not a permission slip to hand production data to an agent. If the source has sensitive data, use masking, reduction, explicit approval, or a non-production source before the restore. The step-by-step version is in the [safe Postgres cloning guide](https://pgsandbox-mcp.lvtd.dev/blog/clone-postgres-database-sandbox/).
 
 The safe rule is simple: choose the smallest data shape that proves the task.
 

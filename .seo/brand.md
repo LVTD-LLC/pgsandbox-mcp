@@ -32,7 +32,7 @@ Technical founders, backend engineers, staff engineers, platform leads, and AI-a
 - Cleanup is scoped to PGSandbox-created resources and backed by metadata.
 - Supports existing local, container-local, VPS, or private Postgres hosts.
 - Includes setup, doctor, and smoke-test flows aimed at agent-assisted installation.
-- Current blog content is managed in Rowset and rendered by Astro.
+- Current blog content is managed as Astro Markdown content files.
 
 ## Competitor / Alternative Set
 

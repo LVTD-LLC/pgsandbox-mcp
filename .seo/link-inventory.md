@@ -24,6 +24,7 @@
 | /blog/ | Blog index | PGSandbox blog; database agent workflow posts; safe Postgres agent workflows | Blog hub. |
 | /blog/postgres-mcp-server-safety-checklist/ | Postgres MCP Server Safety Checklist for Coding Agents | Postgres MCP server safety checklist; safe Postgres MCP server; MCP database safety checklist; database access checklist for coding agents | Rowset row 1578; status `published`. |
 | /blog/database-branching-vs-postgres-sandboxes/ | Database Branching vs Disposable Postgres Sandboxes | database branching; database branching vs sandboxes; disposable Postgres sandboxes; agent database sandboxes | Rowset status `published`; comparison page for environment branches vs task sandboxes. |
+| /blog/clone-postgres-database-sandbox/ | How to Clone a Postgres Database Into a Safe Sandbox | clone a Postgres database; Postgres database cloning sandbox; safe Postgres cloning guide; disposable database clone for agents; pg_dump and pg_restore sandbox | Astro content file; how-to for cloning source state into a tracked disposable sandbox. |
 
 ## Changelog
 

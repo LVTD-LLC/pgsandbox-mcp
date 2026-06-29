@@ -149,7 +149,7 @@ If the answer is unclear, the tool is not ready for agent use.
 
 Realistic data makes agent validation much better. It also raises the stakes.
 
-PostgreSQL's `pg_dump` exports a single database and can make consistent exports without blocking readers or writers (https://www.postgresql.org/docs/current/app-pgdump.html). That makes `pg_dump` and `pg_restore` a practical baseline for cloning source data into a sandbox. But the source still matters.
+PostgreSQL's `pg_dump` exports a single database and can make consistent exports without blocking readers or writers (https://www.postgresql.org/docs/current/app-pgdump.html). That makes `pg_dump` and `pg_restore` a practical baseline for cloning source data into a sandbox. But the source still matters. If you need the full workflow, see the [Postgres database cloning sandbox guide](https://pgsandbox-mcp.lvtd.dev/blog/clone-postgres-database-sandbox/).
 
 For agent workflows, the safer clone pattern is:
 
