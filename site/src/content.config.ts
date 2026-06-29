@@ -8,7 +8,7 @@ const blog = defineCollection({
     title: z.string(),
     excerpt: z.string(),
     author: z.string().default('PGSandbox Team'),
-    status: z.enum(['draft', 'published']),
+    status: z.enum(['draft', 'published']).default('draft'),
     publishedAt: z.string(),
     updatedAt: z.string().optional().default(''),
     tags: z.array(z.string()).default([]),
