@@ -1,6 +1,6 @@
 ---
 import BaseLayout from '../../layouts/BaseLayout.astro';
-import { getPublishedBlogPosts, type BlogPost } from '../../lib/rowsetBlog';
+import { blogAuthor, getPublishedBlogPosts, type BlogPost } from '../../lib/rowsetBlog';
 
 export async function getStaticPaths() {
   const posts = await getPublishedBlogPosts();
@@ -18,12 +18,61 @@ type Props = {
 const { post } = Astro.props;
 const description = post.metaDescription || post.excerpt;
 const canonicalUrl = post.canonicalUrl || new URL(`/blog/${post.slug}/`, Astro.site || Astro.url.origin).toString();
+
+function toArticleTime(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const normalized = trimmed.includes('T') ? trimmed : `${trimmed}T00:00:00.000Z`;
+  const date = new Date(normalized);
+
+  return Number.isNaN(date.valueOf()) ? undefined : date.toISOString();
+}
+
+const publishedTime = toArticleTime(post.publishedAt);
+const modifiedTime = toArticleTime(post.updatedAt || post.publishedAt) || publishedTime;
+const structuredData = {
+  '@context': 'https://schema.org',
+  '@type': 'BlogPosting',
+  headline: post.title,
+  description,
+  ...(publishedTime ? { datePublished: publishedTime } : {}),
+  ...(modifiedTime ? { dateModified: modifiedTime } : {}),
+  mainEntityOfPage: {
+    '@type': 'WebPage',
+    '@id': canonicalUrl
+  },
+  author: [
+    {
+      '@type': 'Person',
+      name: blogAuthor.name,
+      url: blogAuthor.url
+    },
+    {
+      '@type': 'Organization',
+      name: 'OpenAI Codex'
+    }
+  ],
+  publisher: {
+    '@type': 'Organization',
+    name: 'PGSandbox MCP',
+    url: new URL('/', Astro.site || Astro.url.origin).toString()
+  },
+  keywords: post.tags.join(', ')
+};
 ---
 <BaseLayout
   title={`${post.metaTitle} - PGSandbox MCP`}
   description={description}
   canonicalUrl={canonicalUrl}
   imageUrl={post.heroImageUrl}
+  ogType="article"
+  articlePublishedTime={publishedTime}
+  articleModifiedTime={modifiedTime}
+  articleAuthor={blogAuthor.credit}
+  structuredData={structuredData}
 >
   <main id="content" class="blog-post-page">
     <article class="container blog-post">
@@ -32,10 +81,12 @@ const canonicalUrl = post.canonicalUrl || new URL(`/blog/${post.slug}/`, Astro.s
         <div class="post-meta">
           <span>{post.category || 'Engineering'}</span>
           <time datetime={post.publishedAt}>{post.publishedAt}</time>
-          <span>{post.author}</span>
         </div>
         <h1>{post.title}</h1>
         <p>{post.excerpt}</p>
+        <p class="byline">
+          By <a href={blogAuthor.url}>{blogAuthor.name}</a> with OpenAI Codex.
+        </p>
         {post.heroImageUrl && <img class="hero-image" src={post.heroImageUrl} alt="" loading="eager" />}
         {post.tags.length > 0 && (
           <div class="tag-list" aria-label="Tags">
@@ -78,6 +129,21 @@ const canonicalUrl = post.canonicalUrl || new URL(`/blog/${post.slug}/`, Astro.s
     color: var(--muted);
     font-size: 1.15rem;
     line-height: 1.72;
+  }
+
+  .blog-post-header .byline {
+    margin: 0 0 1.1rem;
+    color: var(--muted);
+    font-size: 1rem;
+    line-height: 1.55;
+  }
+
+  .byline a {
+    color: var(--primary);
+    font-weight: 800;
+    text-decoration: underline;
+    text-decoration-thickness: 2px;
+    text-underline-offset: 4px;
   }
 
   .post-meta {
