@@ -1583,6 +1583,7 @@ impl PostgresSandboxManager {
         };
         let timeout = workflow_timeout(input.timeout_seconds);
         let created_sandbox = !selector_has_database(&input.database_id, &input.database_name);
+        let mut created_profile = None;
         let connection = if created_sandbox {
             let created = self
                 .create_database(CreateDatabaseInput {
@@ -1597,6 +1598,7 @@ impl PostgresSandboxManager {
                     labels: input.labels,
                 })
                 .await?;
+            created_profile = Some(created.profile.clone());
             ConnectionStringOutput {
                 database_id: created.database_id,
                 database_name: created.database_name,
@@ -1611,11 +1613,44 @@ impl PostgresSandboxManager {
             })
             .await?
         };
-        let before = collect_schema_digest_for_url(&connection.connection_string).await?;
-        let command_result =
-            run_repo_command(&repo_path, &command, &connection.connection_string, timeout).await?;
-        let after = collect_schema_digest_for_url(&connection.connection_string).await?;
-        let diff = diff_workflow_schema_digests(&before, &after);
+        let validation_result = async {
+            let before = collect_schema_digest_for_url(&connection.connection_string).await?;
+            let command_result =
+                run_repo_command(&repo_path, &command, &connection.connection_string, timeout)
+                    .await?;
+            let after = collect_schema_digest_for_url(&connection.connection_string).await?;
+            let diff = diff_workflow_schema_digests(&before, &after);
+            anyhow::Ok((command_result, diff))
+        }
+        .await;
+        let (command_result, diff) = match validation_result {
+            Ok(result) => result,
+            Err(error) if created_sandbox => {
+                let cleanup = self
+                    .delete_database(DatabaseSelector {
+                        profile: created_profile,
+                        database_id: Some(connection.database_id.clone()),
+                        database_name: None,
+                    })
+                    .await;
+                return match cleanup {
+                    Ok(_) => Ok(workflow_failure(
+                        "Migration validation failed before completion; the created sandbox was deleted.",
+                        workflow_error(
+                            "migration_validation_error",
+                            error.to_string(),
+                            Some("Retry after fixing the validation error. No sandbox cleanup is required.".to_string()),
+                        ),
+                        None,
+                    )),
+                    Err(cleanup_error) => Err(anyhow::anyhow!(
+                        "migration validation failed and cleanup also failed for {}: {error}; cleanup error: {cleanup_error}",
+                        connection.database_name
+                    )),
+                };
+            }
+            Err(error) => return Err(error),
+        };
         let ok = command_result.exit_code == Some(0);
         let output = validate_migration_output(
             &connection.database_id,
@@ -2515,8 +2550,6 @@ fn is_known_django_migration_command(command: &[String]) -> bool {
             && !arg.contains('>')
             && !arg.contains('<')
             && !arg.starts_with("--database")
-            && !arg.starts_with("--settings")
-            && !arg.starts_with("--pythonpath")
     })
 }
 
@@ -2622,9 +2655,11 @@ where
             output.extend_from_slice(&buffer[..take]);
             if take < count {
                 truncated = true;
+                break;
             }
         } else {
             truncated = true;
+            break;
         }
     }
     Ok((String::from_utf8_lossy(&output).to_string(), truncated))
@@ -5110,6 +5145,20 @@ mod tests {
         .unwrap()
         .unwrap_err();
         assert_eq!(alternate_database.code, "unsafe_migration_command");
+
+        let custom_settings = resolve_migration_command(
+            repo,
+            Some(vec![
+                "python".to_string(),
+                "manage.py".to_string(),
+                "migrate".to_string(),
+                "--settings=myapp.settings.ci".to_string(),
+                "--pythonpath".to_string(),
+                "src".to_string(),
+            ]),
+        )
+        .unwrap();
+        assert!(custom_settings.is_ok());
     }
 
     #[test]
