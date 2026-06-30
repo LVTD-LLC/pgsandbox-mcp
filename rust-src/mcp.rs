@@ -9,9 +9,12 @@ use serde_json::{json, Map, Value};
 use crate::{
     config::SandboxConfig,
     postgres::{
-        CleanupExpiredInput, CloneDatabaseInput, CreateDatabaseInput, DatabaseSelector,
-        ExplainQueryInput, ListDatabasesInput, PostgresSandboxManager, RunSqlInput,
-        SchemaDiffInput,
+        CleanupExpiredInput, CloneDatabaseInput, CreateDatabaseInput,
+        CreateSandboxFromTemplateInput, CreateSchemaSnapshotInput, CreateTemplateFromSandboxInput,
+        DatabaseSelector, DeleteSchemaSnapshotInput, DeleteTemplateInput, DiffSchemaSnapshotInput,
+        ExplainQueryInput, ListDatabasesInput, ListSchemaSnapshotsInput, ListTemplatesInput,
+        PostgresSandboxManager, PrepareForRepoInput, RunMigrationsInput, RunSqlInput,
+        SchemaDiffInput, SeedDatabaseInput, ValidateMigrationInput,
     },
     telemetry::{properties, Telemetry, EVENT_MCP_SERVER_STARTED, EVENT_MCP_TOOL_COMPLETED},
 };
@@ -211,6 +214,234 @@ impl PgsandboxServer {
             "explain_query",
             event_properties,
             self.manager.explain_query(input),
+        )
+        .await
+    }
+
+    #[tool(description = "Create a named schema snapshot for a PGSandbox-owned database.")]
+    async fn create_schema_snapshot(
+        &self,
+        Parameters(input): Parameters<CreateSchemaSnapshotInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let event_properties = properties([
+            ("hasProfile", json!(input.profile.is_some())),
+            ("hasDatabaseId", json!(input.database_id.is_some())),
+            ("hasDatabaseName", json!(input.database_name.is_some())),
+            ("hasNotes", json!(input.notes.is_some())),
+        ]);
+        self.tracked_tool(
+            "create_schema_snapshot",
+            event_properties,
+            self.manager.create_schema_snapshot(input),
+        )
+        .await
+    }
+
+    #[tool(description = "List schema snapshots for a PGSandbox-owned database.")]
+    async fn list_schema_snapshots(
+        &self,
+        Parameters(input): Parameters<ListSchemaSnapshotsInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let event_properties = properties([
+            ("hasProfile", json!(input.profile.is_some())),
+            ("hasDatabaseId", json!(input.database_id.is_some())),
+            ("hasDatabaseName", json!(input.database_name.is_some())),
+        ]);
+        self.tracked_tool(
+            "list_schema_snapshots",
+            event_properties,
+            self.manager.list_schema_snapshots(input),
+        )
+        .await
+    }
+
+    #[tool(description = "Delete a named schema snapshot for a PGSandbox-owned database.")]
+    async fn delete_schema_snapshot(
+        &self,
+        Parameters(input): Parameters<DeleteSchemaSnapshotInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let event_properties = properties([
+            ("hasProfile", json!(input.profile.is_some())),
+            ("hasDatabaseId", json!(input.database_id.is_some())),
+            ("hasDatabaseName", json!(input.database_name.is_some())),
+        ]);
+        self.tracked_tool(
+            "delete_schema_snapshot",
+            event_properties,
+            self.manager.delete_schema_snapshot(input),
+        )
+        .await
+    }
+
+    #[tool(description = "Diff a named schema snapshot against the current sandbox schema.")]
+    async fn diff_schema_snapshot(
+        &self,
+        Parameters(input): Parameters<DiffSchemaSnapshotInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let event_properties = properties([
+            ("hasProfile", json!(input.profile.is_some())),
+            ("hasDatabaseId", json!(input.database_id.is_some())),
+            ("hasDatabaseName", json!(input.database_name.is_some())),
+        ]);
+        self.tracked_tool(
+            "diff_schema_snapshot",
+            event_properties,
+            self.manager.diff_schema_snapshot(input),
+        )
+        .await
+    }
+
+    #[tool(description = "Detect a Django repo and write a secret-free PG Sandbox project config.")]
+    async fn prepare_for_repo(
+        &self,
+        Parameters(input): Parameters<PrepareForRepoInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let event_properties = properties([
+            ("hasProfile", json!(input.profile.is_some())),
+            ("hasDatabaseId", json!(input.database_id.is_some())),
+            ("hasDatabaseName", json!(input.database_name.is_some())),
+        ]);
+        self.tracked_tool(
+            "prepare_for_repo",
+            event_properties,
+            self.manager.prepare_for_repo(input),
+        )
+        .await
+    }
+
+    #[tool(description = "Run an explicit Django migration command against a sandbox database.")]
+    async fn run_migrations(
+        &self,
+        Parameters(input): Parameters<RunMigrationsInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let event_properties = properties([
+            ("hasProfile", json!(input.profile.is_some())),
+            ("hasDatabaseId", json!(input.database_id.is_some())),
+            ("hasDatabaseName", json!(input.database_name.is_some())),
+            ("hasCommand", json!(input.command.is_some())),
+            ("hasTimeout", json!(input.timeout_seconds.is_some())),
+        ]);
+        self.tracked_tool(
+            "run_migrations",
+            event_properties,
+            self.manager.run_migrations(input),
+        )
+        .await
+    }
+
+    #[tool(description = "Run Django migrations in a sandbox and return before/after schema diff.")]
+    async fn validate_migration(
+        &self,
+        Parameters(input): Parameters<ValidateMigrationInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let event_properties = properties([
+            ("hasProfile", json!(input.profile.is_some())),
+            ("hasDatabaseId", json!(input.database_id.is_some())),
+            ("hasDatabaseName", json!(input.database_name.is_some())),
+            ("hasCommand", json!(input.command.is_some())),
+            ("hasTimeout", json!(input.timeout_seconds.is_some())),
+            ("hasTtlMinutes", json!(input.ttl_minutes.is_some())),
+            ("hasOwner", json!(input.owner.is_some())),
+            (
+                "labelCount",
+                json!(input.labels.as_ref().map_or(0, |labels| labels.len())),
+            ),
+        ]);
+        self.tracked_tool(
+            "validate_migration",
+            event_properties,
+            self.manager.validate_migration(input),
+        )
+        .await
+    }
+
+    #[tool(description = "Run an explicit seed command against a sandbox database.")]
+    async fn seed_database(
+        &self,
+        Parameters(input): Parameters<SeedDatabaseInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let event_properties = properties([
+            ("hasProfile", json!(input.profile.is_some())),
+            ("hasDatabaseId", json!(input.database_id.is_some())),
+            ("hasDatabaseName", json!(input.database_name.is_some())),
+            ("hasCommand", json!(input.command.is_some())),
+            ("hasTimeout", json!(input.timeout_seconds.is_some())),
+        ]);
+        self.tracked_tool(
+            "seed_database",
+            event_properties,
+            self.manager.seed_database(input),
+        )
+        .await
+    }
+
+    #[tool(description = "Export a PGSandbox-owned database to a local template artifact.")]
+    async fn create_template_from_sandbox(
+        &self,
+        Parameters(input): Parameters<CreateTemplateFromSandboxInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let event_properties = properties([
+            ("hasProfile", json!(input.profile.is_some())),
+            ("hasDatabaseId", json!(input.database_id.is_some())),
+            ("hasDatabaseName", json!(input.database_name.is_some())),
+            ("hasCreatedBy", json!(input.created_by.is_some())),
+            ("hasNotes", json!(input.notes.is_some())),
+        ]);
+        self.tracked_tool(
+            "create_template_from_sandbox",
+            event_properties,
+            self.manager.create_template_from_sandbox(input),
+        )
+        .await
+    }
+
+    #[tool(description = "Create a new sandbox database from a local template artifact.")]
+    async fn create_sandbox_from_template(
+        &self,
+        Parameters(input): Parameters<CreateSandboxFromTemplateInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let event_properties = properties([
+            ("hasProfile", json!(input.profile.is_some())),
+            ("hasNameHint", json!(input.name_hint.is_some())),
+            ("hasOwner", json!(input.owner.is_some())),
+            ("hasTtlMinutes", json!(input.ttl_minutes.is_some())),
+            (
+                "labelCount",
+                json!(input.labels.as_ref().map_or(0, |labels| labels.len())),
+            ),
+        ]);
+        self.tracked_tool(
+            "create_sandbox_from_template",
+            event_properties,
+            self.manager.create_sandbox_from_template(input),
+        )
+        .await
+    }
+
+    #[tool(description = "List local template artifacts for a profile.")]
+    async fn list_templates(
+        &self,
+        Parameters(input): Parameters<ListTemplatesInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let event_properties = properties([("hasProfile", json!(input.profile.is_some()))]);
+        self.tracked_tool(
+            "list_templates",
+            event_properties,
+            self.manager.list_templates(input),
+        )
+        .await
+    }
+
+    #[tool(description = "Delete a local template artifact.")]
+    async fn delete_template(
+        &self,
+        Parameters(input): Parameters<DeleteTemplateInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let event_properties = properties([("hasProfile", json!(input.profile.is_some()))]);
+        self.tracked_tool(
+            "delete_template",
+            event_properties,
+            self.manager.delete_template(input),
         )
         .await
     }

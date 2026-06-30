@@ -7,8 +7,22 @@ const tools = [
   ['get_connection_string', 'Returns the connection string for a created sandbox database plus expiry metadata.'],
   ['run_sql', 'Runs SQL against an experiment database with optional readonly mode and capped row limits.'],
   ['describe_schema', 'Returns tables, columns, indexes, and extensions for an experiment database.'],
+  ['schema_digest', 'Returns a compact fingerprinted schema digest with object counts and bounded object summaries.'],
+  ['schema_diff', 'Compares two sandbox schemas and returns bounded added, removed, and changed object lists.'],
+  ['create_schema_snapshot', 'Stores an explicit named schema checkpoint for a PGSandbox-owned database.'],
+  ['list_schema_snapshots', 'Lists saved schema checkpoints for a selected sandbox.'],
+  ['diff_schema_snapshot', 'Compares a saved schema checkpoint with the current sandbox schema.'],
+  ['delete_schema_snapshot', 'Deletes a saved schema checkpoint artifact.'],
+  ['prepare_for_repo', 'Detects a Django repo and writes a secret-free .pgsandbox/project.json workflow config.'],
+  ['run_migrations', 'Runs an explicit Django migrate command against a selected sandbox with bounded output.'],
+  ['validate_migration', 'Captures before and after schema digests around a Django migration run and returns a compact diff.'],
+  ['seed_database', 'Runs only an explicit seed command against a selected sandbox.'],
+  ['create_template_from_sandbox', 'Exports a PGSandbox-owned sandbox to a local pg_dump template artifact.'],
+  ['create_sandbox_from_template', 'Restores a local template into a fresh tracked sandbox with its own TTL and role.'],
+  ['list_templates', 'Lists local template artifacts for a profile.'],
+  ['delete_template', 'Deletes a local template artifact.'],
   ['list_databases', 'Lists active experiment databases, optionally filtered by owner, with a truncation flag and no full secrets.'],
   ['cleanup_expired', 'Deletes expired resources, with dry-run support for audit-friendly cleanup.']
 ];
 ---
-<DocsLayout title="MCP tool contract" description="PGSandbox MCP v0 tool surface."><h1>MCP tool contract</h1><p>This is the early v0 surface. The tools are intentionally narrow: agents can request tracked database lifecycle operations without receiving a general-purpose database admin shell.</p>{tools.map(([name, body]) => <section><h2><code>{name}</code></h2><p>{body}</p></section>)}</DocsLayout>
+<DocsLayout title="MCP tool contract" description="PGSandbox MCP v0 tool surface."><h1>MCP tool contract</h1><p>This is the early v0 surface. The tools are intentionally narrow: agents can request tracked database lifecycle operations without receiving a general-purpose database admin shell.</p><p>Workflow tools return compact envelopes with <code>ok</code>, <code>summary</code>, structured errors, warnings, optional change counts, detail handles, and bounded result data.</p>{tools.map(([name, body]) => <section><h2><code>{name}</code></h2><p>{body}</p></section>)}</DocsLayout>

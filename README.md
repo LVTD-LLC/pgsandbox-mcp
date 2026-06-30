@@ -350,10 +350,40 @@ V0 supports:
 - `schema_digest`
 - `schema_diff`
 - `explain_query`
+- `create_schema_snapshot`
+- `list_schema_snapshots`
+- `diff_schema_snapshot`
+- `delete_schema_snapshot`
+- `prepare_for_repo`
+- `run_migrations`
+- `validate_migration`
+- `seed_database`
+- `create_template_from_sandbox`
+- `create_sandbox_from_template`
+- `list_templates`
+- `delete_template`
 - `list_databases`
 - `cleanup_expired`
 
 See [docs/mcp-tools.md](docs/mcp-tools.md) for details.
+
+## Agent Workflows
+
+For a Django repo, an agent can:
+
+1. Create or select a sandbox with `create_database`.
+2. Call `prepare_for_repo` with the repo path. This writes a secret-free
+   `.pgsandbox/project.json` when Django is detected.
+3. Call `validate_migration` to run `python manage.py migrate --noinput`
+   against the sandbox and receive a before/after schema diff.
+4. Optionally call `seed_database` with an explicit seed command.
+5. Save reusable state with `create_schema_snapshot` or
+   `create_template_from_sandbox`.
+
+Workflow tools use compact envelopes with `ok`, `summary`, structured
+`errors`, bounded output, and optional `changedObjects`. Commands are executed
+without a shell and receive sandbox credentials through environment variables,
+not permanent settings rewrites.
 
 ## Local Shape
 
@@ -366,7 +396,7 @@ The service uses:
 - optional explicit Postgres admin profiles with permission to create databases and roles
 - metadata and audit tables for ownership, TTL, encrypted sandbox credentials,
   cleanup state, and lifecycle events
-- optional `pg_dump` and `pg_restore` on `PATH` for `clone_database`
+- optional `pg_dump` and `pg_restore` on `PATH` for `clone_database` and template tools
 
 The local runtime stores its selected port, socket directory, data directory,
 log file, and private admin URL in `~/.pgsandbox/local-postgres.json`. CLI output

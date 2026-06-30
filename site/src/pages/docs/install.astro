@@ -84,4 +84,42 @@ pgsandbox-mcp smoke-test</code></pre>
     Restart your MCP client after setup. In Codex, run <code>/mcp</code> to
     verify the <code>pgsandbox</code> server is available.
   </p>
+
+  <h2>No-Docker quickstart</h2>
+  <pre class="shell"><code>pgsandbox-mcp local start
+pgsandbox-mcp doctor
+pgsandbox-mcp smoke-test</code></pre>
+  <p>
+    This can run while Docker or another developer Postgres owns
+    <code>5432</code>. The managed local runtime chooses a high local port such
+    as <code>65432</code> or the next available port.
+  </p>
+
+  <h2>Django workflow</h2>
+  <p>
+    Agents can create a sandbox, call <code>prepare_for_repo</code> for a
+    Django checkout, then call <code>validate_migration</code> to run
+    <code>python manage.py migrate --noinput</code> against the sandbox and
+    receive a compact schema diff.
+  </p>
+  <p>
+    Seed commands must be explicit. Prisma, Rails, and Alembic adapters are
+    future work unless a user provides a safe command for the selected sandbox.
+  </p>
+
+  <h2>Troubleshooting</h2>
+  <ul>
+    <li>Install <code>initdb</code>, <code>pg_ctl</code>, and <code>postgres</code> for the managed local runtime.</li>
+    <li>Install <code>pg_dump</code> and <code>pg_restore</code> for cloning and template tools.</li>
+    <li>Use <code>PGSANDBOX_HOME</code> when <code>~/.pgsandbox</code> is not writable.</li>
+    <li>Use <code>list_databases</code>, <code>delete_database</code>, and <code>cleanup_expired</code> for stale sandboxes.</li>
+    <li>Only pass <code>--admin-url</code>, <code>PGSANDBOX_ADMIN_DATABASE_URL</code>, or <code>PGSANDBOX_CONFIG</code> for intentional external profiles.</li>
+  </ul>
+
+  <h2>npm/npx status</h2>
+  <p>
+    Public npm/npx publishing is deferred. Use Homebrew, the GitHub install
+    script, or source install until a package name, release process, and binary
+    packaging are explicitly chosen.
+  </p>
 </DocsLayout>
