@@ -1628,7 +1628,7 @@ impl PostgresSandboxManager {
             Err(error) if created_sandbox => {
                 let cleanup = self
                     .delete_database(DatabaseSelector {
-                        profile: created_profile,
+                        profile: created_profile.clone(),
                         database_id: Some(connection.database_id.clone()),
                         database_name: None,
                     })
@@ -1660,8 +1660,8 @@ impl PostgresSandboxManager {
             diff.clone(),
         );
 
-        Ok(if ok {
-            workflow_success(
+        if ok {
+            return Ok(workflow_success(
                 "Migration validation completed successfully.",
                 Some(diff.changed_objects),
                 Vec::new(),
@@ -1671,22 +1671,51 @@ impl PostgresSandboxManager {
                     "createdSandbox": created_sandbox
                 })],
                 output,
-            )
+            ));
+        }
+
+        let deleted_auto_sandbox = if created_sandbox {
+            let cleanup = self
+                .delete_database(DatabaseSelector {
+                    profile: created_profile,
+                    database_id: Some(connection.database_id.clone()),
+                    database_name: None,
+                })
+                .await;
+            match cleanup {
+                Ok(_) => true,
+                Err(cleanup_error) => {
+                    return Err(anyhow::anyhow!(
+                        "migration validation failed and cleanup also failed for {}: cleanup error: {cleanup_error}",
+                        connection.database_name
+                    ))
+                }
+            }
         } else {
-            workflow_failure_with_changes(
-                "Migration validation failed.",
-                diff.changed_objects,
-                workflow_error(
-                    "migration_failed",
-                    format!("Migration command exited with {:?}", output.exit_code),
-                    Some(
+            false
+        };
+
+        Ok(workflow_failure_with_changes(
+            if deleted_auto_sandbox {
+                "Migration validation failed; the created sandbox was deleted."
+            } else {
+                "Migration validation failed."
+            },
+            diff.changed_objects,
+            workflow_error(
+                "migration_failed",
+                format!("Migration command exited with {:?}", output.exit_code),
+                Some(
+                    if deleted_auto_sandbox {
+                        "Inspect stderr/stdout and rerun after fixing the migration. No sandbox cleanup is required."
+                    } else {
                         "Inspect stderr/stdout in the result and the schema diff before retrying."
-                            .to_string(),
-                    ),
+                    }
+                    .to_string(),
                 ),
-                Some(output),
-            )
-        })
+            ),
+            Some(output),
+        ))
     }
 
     pub async fn seed_database(
@@ -2590,6 +2619,7 @@ async fn run_repo_command(
     let mut child = Command::new(&command[0])
         .args(&command[1..])
         .current_dir(repo_path)
+        .env_clear()
         .envs(env.iter())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2807,6 +2837,12 @@ fn snapshot_paths(
     snapshot_name: &str,
 ) -> anyhow::Result<SnapshotPaths> {
     let profile = profile_artifact_component(profile);
+    let database_id = validate_artifact_name(database_id, "databaseId").map_err(|error| {
+        anyhow::anyhow!(
+            "invalid databaseId for schema snapshot path: {}",
+            error.message
+        )
+    })?;
     let dir = pgsandbox_state_root()?
         .join("schema-snapshots")
         .join(profile)
@@ -3007,7 +3043,7 @@ fn mask_connection_string(value: &str) -> String {
         }
         return url.to_string();
     }
-    value.to_string()
+    "<unparseable connection string>".to_string()
 }
 
 async fn connect_admin(
@@ -5050,6 +5086,19 @@ mod tests {
         assert!(validate_artifact_name("../prod", "templateName").is_err());
         assert!(validate_artifact_name("nested/name", "templateName").is_err());
         assert!(validate_artifact_name("", "templateName").is_err());
+        assert!(snapshot_paths("local", "../prod", "before").is_err());
+    }
+
+    #[test]
+    fn mask_connection_string_never_returns_unparseable_input() {
+        let masked = mask_connection_string("postgres://sandbox:secret@localhost/app");
+
+        assert!(masked.contains("****"));
+        assert!(!masked.contains("secret"));
+        assert_eq!(
+            mask_connection_string("not a postgres url with password=secret"),
+            "<unparseable connection string>"
+        );
     }
 
     #[test]
