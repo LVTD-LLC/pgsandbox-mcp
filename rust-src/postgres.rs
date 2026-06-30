@@ -2616,11 +2616,11 @@ async fn run_repo_command(
     }
     let env = database_command_env(database_url)?;
     let started = std::time::Instant::now();
-    let mut child = Command::new(&command[0])
+    let mut command_builder = Command::new(&command[0]);
+    apply_command_env(&mut command_builder, &env);
+    let mut child = command_builder
         .args(&command[1..])
         .current_dir(repo_path)
-        .env_clear()
-        .envs(env.iter())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -2665,6 +2665,13 @@ async fn run_repo_command(
         stdout_truncated,
         stderr_truncated,
     })
+}
+
+fn apply_command_env(command: &mut Command, env: &BTreeMap<String, String>) {
+    command.env_clear().envs(env.iter());
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
 }
 
 async fn read_bounded_output<R>(mut reader: R) -> anyhow::Result<(String, bool)>
@@ -2978,9 +2985,10 @@ async fn dump_database_to_file(database_url: &str, dump_path: &Path) -> anyhow::
     let temp_path = dump_path.with_extension(format!("dump.tmp-{}", Uuid::new_v4().simple()));
     let connection = pg_tool_connection_from_url(database_url)
         .context("sandbox connection string is not a supported Postgres URL")?;
-    let output = Command::new("pg_dump")
+    let mut command = Command::new("pg_dump");
+    apply_command_env(&mut command, &connection.env);
+    let output = command
         .args(pg_dump_file_args(&connection.database, &temp_path, false))
-        .envs(connection.env.iter())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .output()
@@ -3007,9 +3015,10 @@ async fn dump_database_to_file(database_url: &str, dump_path: &Path) -> anyhow::
 async fn restore_database_from_file(dump_path: &Path, database_url: &str) -> anyhow::Result<()> {
     let connection = pg_tool_connection_from_url(database_url)
         .context("target sandbox connection string is not a supported Postgres URL")?;
-    let output = Command::new("pg_restore")
+    let mut command = Command::new("pg_restore");
+    apply_command_env(&mut command, &connection.env);
+    let output = command
         .args(pg_restore_file_args(&connection.database, dump_path))
-        .envs(connection.env.iter())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .output()
@@ -3676,9 +3685,9 @@ async fn clone_with_pg_tools(
         .context("target sandbox connection string is not a supported Postgres URL")?;
 
     let mut dump_command = Command::new("pg_dump");
+    apply_command_env(&mut dump_command, &source.env);
     dump_command
         .args(pg_dump_args(&source.database, schema_only))
-        .envs(source.env.iter())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -3691,9 +3700,9 @@ async fn clone_with_pg_tools(
         .context("pg_dump stdout pipe was not available")?;
 
     let mut restore_command = Command::new("pg_restore");
+    apply_command_env(&mut restore_command, &target.env);
     restore_command
         .args(pg_restore_args(&target.database))
-        .envs(target.env.iter())
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
