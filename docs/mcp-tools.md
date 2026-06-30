@@ -6,6 +6,16 @@ When a tool omits `profile`, PGSandbox uses the configured default profile. With
 no explicit `PGSANDBOX_ADMIN_DATABASE_URL` or `PGSANDBOX_CONFIG`, that default
 is the managed local Postgres cluster under `~/.pgsandbox/`.
 
+Workflow-oriented tools return a compact result envelope:
+
+- `ok`: whether the requested workflow completed
+- `summary`: short human-readable outcome
+- `changedObjects`: optional counts for schema changes
+- `warnings`: bounded warnings
+- `errors`: structured `code`, `message`, and optional `hint`
+- `detailHandles`: opaque pointers agents can use in follow-up calls
+- `result`: workflow-specific output when available
+
 ## `create_database`
 
 Creates an isolated database and login role.
@@ -183,6 +193,162 @@ Returns:
 - `databaseName`
 - `summary`
 - `plan`
+
+## Schema Snapshots
+
+Schema snapshots are explicit named checkpoints stored under PG Sandbox's local
+state directory. They are not automatic truth; create a new snapshot whenever a
+new before-state matters.
+
+### `create_schema_snapshot`
+
+Inputs:
+
+- `profile`: optional Postgres profile name
+- `databaseId` or `databaseName`
+- `snapshotName`: local artifact name
+- `notes`: optional short notes
+
+Returns snapshot metadata, object counts, and a detail handle.
+
+### `list_schema_snapshots`
+
+Inputs:
+
+- `profile`: optional Postgres profile name
+- `databaseId` or `databaseName`
+
+Returns snapshot summaries for the selected PGSandbox-owned database.
+
+### `diff_schema_snapshot`
+
+Inputs:
+
+- `profile`: optional Postgres profile name
+- `databaseId` or `databaseName`
+- `snapshotName`
+
+Returns the saved snapshot compared to the current sandbox schema.
+
+### `delete_schema_snapshot`
+
+Inputs:
+
+- `profile`: optional Postgres profile name
+- `databaseId` or `databaseName`
+- `snapshotName`
+
+Deletes the local snapshot artifact.
+
+## Django Workflow Tools
+
+These tools are repo-aware but conservative. They do not rewrite application
+settings permanently and they run commands without a shell. Database access is
+injected through `DATABASE_URL`, `PGSANDBOX_DATABASE_URL`, and libpq-style
+`PG*` environment variables.
+
+### `prepare_for_repo`
+
+Detects a Django repo from `manage.py` and settings patterns, then writes a
+secret-free `.pgsandbox/project.json` with a default Django migration command.
+If detection is uncertain, the tool returns `ok: false` with an action-needed
+message instead of guessing.
+
+Inputs:
+
+- `repoPath`
+- `profile`: optional Postgres profile name
+- `databaseId` or `databaseName`: optional sandbox to report as the masked target
+
+### `run_migrations`
+
+Runs only an explicit Django `migrate` command against a selected sandbox.
+
+Inputs:
+
+- `repoPath`
+- `profile`: optional Postgres profile name
+- `databaseId` or `databaseName`
+- `command`: optional argv array; defaults to `.pgsandbox/project.json`
+- `timeoutSeconds`: optional timeout, capped by the server
+
+### `validate_migration`
+
+Captures a before schema digest, runs the Django migration command against a
+fresh or selected sandbox, captures the after digest, and returns a compact
+schema diff plus bounded command output.
+
+Inputs:
+
+- `repoPath`
+- `profile`: optional Postgres profile name
+- `databaseId` or `databaseName`: optional; omitted creates a fresh sandbox
+- `command`: optional argv array; defaults to `.pgsandbox/project.json`
+- `timeoutSeconds`
+- `nameHint`, `ttlMinutes`, `owner`, `labels`: used when creating a fresh sandbox
+
+### `seed_database`
+
+Runs only an explicit configured seed command against a selected sandbox. It
+does not auto-discover or auto-run repo scripts.
+
+Inputs:
+
+- `repoPath`
+- `profile`: optional Postgres profile name
+- `databaseId` or `databaseName`
+- `command`: optional argv array; defaults to `.pgsandbox/project.json` `seedCommand`
+- `timeoutSeconds`
+
+## Template Tools
+
+Templates are local artifacts under PG Sandbox's managed state directory. They
+are created only from PGSandbox-owned databases and restored into newly tracked
+PGSandbox-owned sandboxes. They use `pg_dump`/`pg_restore` and are not
+copy-on-write forks, hosted snapshots, or production-data workflows.
+
+### `create_template_from_sandbox`
+
+Inputs:
+
+- `profile`: optional Postgres profile name
+- `databaseId` or `databaseName`
+- `templateName`
+- `createdBy`: optional actor label
+- `notes`: optional notes
+
+Returns metadata including source sandbox id, created time, owner, Postgres
+version, size estimate, notes, and a privacy warning.
+
+### `create_sandbox_from_template`
+
+Inputs:
+
+- `profile`: optional Postgres profile name
+- `templateName`
+- `nameHint`
+- `ttlMinutes`
+- `owner`
+- `labels`
+
+Returns the new sandbox metadata and connection string.
+
+### `list_templates`
+
+Inputs:
+
+- `profile`: optional Postgres profile name
+
+Returns local template metadata for the selected profile.
+
+### `delete_template`
+
+Inputs:
+
+- `profile`: optional Postgres profile name
+- `templateName`
+
+Deletes the local template dump and metadata.
 
 ## `list_databases`
 

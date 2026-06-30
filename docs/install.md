@@ -209,3 +209,93 @@ pgsandbox-mcp smoke-test
 ```
 
 Then restart your MCP client and ask it to create a disposable Postgres sandbox.
+
+## No-Docker Quickstart
+
+PGSandbox does not need Docker and does not bind `localhost:5432` by default.
+This check is safe to run while Docker or another developer Postgres is already
+using port `5432`:
+
+```bash
+pgsandbox-mcp local start
+pgsandbox-mcp doctor
+pgsandbox-mcp smoke-test
+```
+
+The local runtime should report its selected high port, usually `65432` or the
+next free port. If `smoke-test` passes, PGSandbox created, queried, and deleted
+a disposable database without touching the service on `5432`.
+
+## MCP Config Examples
+
+Use the current native binary command in client configs. The `setup` command
+writes these shapes automatically, but `--dry-run` is useful when reviewing
+what will change.
+
+```bash
+pgsandbox-mcp setup --client codex --dry-run
+pgsandbox-mcp setup --client claude-desktop --dry-run
+pgsandbox-mcp setup --client cursor --scope project --dry-run
+pgsandbox-mcp setup --client vscode --scope project --dry-run
+```
+
+Codex and user-scoped setup are usually the shortest path:
+
+```bash
+pgsandbox-mcp setup --client codex
+```
+
+Cursor and VS Code can use project scope when the repo should carry the MCP
+entry:
+
+```bash
+pgsandbox-mcp setup --client cursor --scope project
+pgsandbox-mcp setup --client vscode --scope project
+```
+
+Only pass `--admin-url` when intentionally opting into an external Postgres
+profile. The default setup uses the managed local cluster.
+
+## Django Recipe
+
+After installation and MCP restart, an agent can validate a Django migration
+without using the developer's real database:
+
+1. Call `create_database` with a short `nameHint`, owner, labels, and TTL.
+2. Call `prepare_for_repo` with the Django checkout path and the sandbox id.
+3. Call `validate_migration` with the same repo path and sandbox id.
+4. Optionally call `seed_database` with an explicit seed command argv array.
+5. Save a checkpoint with `create_schema_snapshot` or create a reusable local
+   template with `create_template_from_sandbox`.
+
+`prepare_for_repo` writes `.pgsandbox/project.json` without secrets. Migration
+and seed tools run commands without a shell, inject the sandbox URL through
+environment variables, and return bounded stdout/stderr.
+
+Prisma, Rails, and Alembic adapters are future work. For now, use explicit
+commands only when they are safe for the target sandbox.
+
+## Troubleshooting
+
+- Missing `initdb`, `pg_ctl`, or `postgres`: install local PostgreSQL server
+  binaries and make sure they are on `PATH`; PGSandbox will not install or run
+  Docker for you.
+- Missing `pg_dump` or `pg_restore`: install PostgreSQL client tools before
+  using `clone_database` or template tools.
+- Occupied local ports: run `pgsandbox-mcp local start`; the managed runtime
+  scans upward from `65432` and does not take over `5432`.
+- Permissions under `~/.pgsandbox`: check ownership of the directory or set
+  `PGSANDBOX_HOME` to a writable local path.
+- Stale sandboxes: call `list_databases`, then `delete_database` for specific
+  sandboxes or `cleanup_expired` for expired ones.
+- External DB safety refusals: `PGSANDBOX_ADMIN_DATABASE_URL`,
+  `PGSANDBOX_CONFIG`, and `--admin-url` are explicit opt-ins. Verify the host
+  and profile are intended for local/private development.
+
+## npm/npx Status
+
+Public npm/npx publishing is intentionally deferred. The supported install paths
+today are the native binary through Homebrew, the GitHub install script, and
+source install. Do not rely on `npx pgsandbox-mcp` unless a later release
+decision explicitly defines the package name, auth/release process, and binary
+packaging.

@@ -130,6 +130,35 @@ Cleanup can run in two ways:
 
 Cleanup should only delete databases listed in the metadata table and matching the configured prefix.
 
+## Schema Snapshots
+
+Schema snapshots are explicit named checkpoints stored under PG Sandbox's local
+state directory, not inside the application repo and not in the admin database.
+Each snapshot records:
+
+- profile and sandbox id
+- snapshot name
+- creation time
+- owner/purpose/labels copied from sandbox metadata
+- Postgres version
+- schema digest version
+- object counts and compact object fingerprints
+
+Snapshots are deliberately manual. They are useful for "before migration" or
+"known good" comparison points, but they are not refreshed automatically and
+should not be treated as current truth after later database changes.
+
+## Local Templates
+
+Templates are local `pg_dump` artifacts plus JSON metadata under PG Sandbox's
+managed state directory. A template can only be created from a live
+PGSandbox-owned sandbox found in metadata. Restoring a template creates a fresh
+tracked sandbox with its own role, TTL, owner, and labels.
+
+This is intentionally a simple local reuse layer for agent QA loops after
+migrations and seeds. It is not copy-on-write forking, DBLab, filesystem
+snapshotting, hosted branching, or a production-data import workflow.
+
 ## Cloning And Future Branching Backends
 
 The first cloning backend should favor portability and clarity:
@@ -139,9 +168,10 @@ The first cloning backend should favor portability and clarity:
 - stream the dump into `pg_restore` connected as the sandbox role
 - delete the destination sandbox if the clone fails
 
-This requires `pg_dump` and `pg_restore` for cloning only. Normal empty sandbox
-creation on the managed local runtime requires `initdb`, `pg_ctl`, and
-`postgres`, but it should continue to work without dump/restore tools.
+This requires `pg_dump` and `pg_restore` for cloning and template tools. Normal
+empty sandbox creation on the managed local runtime requires `initdb`,
+`pg_ctl`, and `postgres`, but it should continue to work without dump/restore
+tools.
 
 If `pg_dump`/`pg_restore` becomes too slow for large seeded states, evaluate a
 branching backend:

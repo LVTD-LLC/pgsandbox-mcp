@@ -1,7 +1,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::LazyLock,
+    time::Duration as StdDuration,
 };
 
 use aes_gcm::{
@@ -17,7 +20,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tokio::{io::AsyncWriteExt, process::Command};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    process::Command,
+    time,
+};
 use tokio_postgres::{
     types::{FromSql, ToSql, Type},
     Client, NoTls, Row, SimpleQueryMessage,
@@ -35,6 +42,13 @@ const AUDIT_TABLE: &str = "pgsandbox_events";
 const DEFAULT_ROW_LIMIT: usize = 100;
 const LIST_DATABASES_LIMIT: usize = 100;
 const ENCRYPTED_PASSWORD_PREFIX: &str = "v1";
+const SCHEMA_DIGEST_VERSION: u32 = 1;
+const MAX_SCHEMA_DIFF_ITEMS: usize = 50;
+const DEFAULT_WORKFLOW_TIMEOUT_SECONDS: u64 = 120;
+const MAX_WORKFLOW_TIMEOUT_SECONDS: u64 = 600;
+const MAX_COMMAND_OUTPUT_BYTES: usize = 8_000;
+const TEMPLATE_PRIVACY_WARNING: &str =
+    "Templates are local PG Sandbox artifacts. Do not create templates from production or sensitive data unless you have explicitly sanitized it.";
 
 static CURSOR_QUERY_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?is)^\s*(?:--[^\n]*(?:\n|$)|/\*.*?\*/\s*)*(select|with|values|table)\b")
@@ -122,6 +136,123 @@ pub struct ExplainQueryInput {
     pub database_id: Option<String>,
     pub database_name: Option<String>,
     pub sql: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSchemaSnapshotInput {
+    pub profile: Option<String>,
+    pub database_id: Option<String>,
+    pub database_name: Option<String>,
+    pub snapshot_name: String,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ListSchemaSnapshotsInput {
+    pub profile: Option<String>,
+    pub database_id: Option<String>,
+    pub database_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteSchemaSnapshotInput {
+    pub profile: Option<String>,
+    pub database_id: Option<String>,
+    pub database_name: Option<String>,
+    pub snapshot_name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffSchemaSnapshotInput {
+    pub profile: Option<String>,
+    pub database_id: Option<String>,
+    pub database_name: Option<String>,
+    pub snapshot_name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareForRepoInput {
+    pub repo_path: String,
+    pub profile: Option<String>,
+    pub database_id: Option<String>,
+    pub database_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunMigrationsInput {
+    pub repo_path: String,
+    pub profile: Option<String>,
+    pub database_id: Option<String>,
+    pub database_name: Option<String>,
+    pub command: Option<Vec<String>>,
+    pub timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidateMigrationInput {
+    pub repo_path: String,
+    pub profile: Option<String>,
+    pub database_id: Option<String>,
+    pub database_name: Option<String>,
+    pub command: Option<Vec<String>>,
+    pub timeout_seconds: Option<u64>,
+    pub name_hint: Option<String>,
+    pub ttl_minutes: Option<u32>,
+    pub owner: Option<String>,
+    pub labels: Option<BTreeMap<String, Value>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SeedDatabaseInput {
+    pub repo_path: String,
+    pub profile: Option<String>,
+    pub database_id: Option<String>,
+    pub database_name: Option<String>,
+    pub command: Option<Vec<String>>,
+    pub timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTemplateFromSandboxInput {
+    pub profile: Option<String>,
+    pub database_id: Option<String>,
+    pub database_name: Option<String>,
+    pub template_name: String,
+    pub created_by: Option<String>,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSandboxFromTemplateInput {
+    pub profile: Option<String>,
+    pub template_name: String,
+    pub name_hint: Option<String>,
+    pub ttl_minutes: Option<u32>,
+    pub owner: Option<String>,
+    pub labels: Option<BTreeMap<String, Value>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ListTemplatesInput {
+    pub profile: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteTemplateInput {
+    pub profile: Option<String>,
+    pub template_name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -279,6 +410,111 @@ pub struct SchemaTableDiff {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkflowEnvelope<T: Serialize> {
+    pub ok: bool,
+    pub summary: String,
+    pub changed_objects: Option<SchemaChangeCounts>,
+    pub warnings: Vec<String>,
+    pub errors: Vec<WorkflowError>,
+    pub detail_handles: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<T>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowError {
+    pub code: String,
+    pub message: String,
+    pub hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowSchemaDigest {
+    pub digest_version: u32,
+    pub fingerprint: String,
+    pub object_counts: SchemaObjectCounts,
+    pub tables: Vec<SchemaObjectDigest>,
+    pub columns: Vec<SchemaObjectDigest>,
+    pub indexes: Vec<SchemaObjectDigest>,
+    pub extensions: Vec<SchemaObjectDigest>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaObjectCounts {
+    pub tables: usize,
+    pub columns: usize,
+    pub indexes: usize,
+    pub extensions: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaObjectDigest {
+    pub kind: String,
+    pub key: String,
+    pub fingerprint: String,
+    pub summary: Value,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaChangeCounts {
+    pub added: usize,
+    pub removed: usize,
+    pub changed: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowSchemaDiffOutput {
+    pub from_fingerprint: String,
+    pub to_fingerprint: String,
+    pub changed_objects: SchemaChangeCounts,
+    pub added: Vec<WorkflowSchemaDiffItem>,
+    pub removed: Vec<WorkflowSchemaDiffItem>,
+    pub changed: Vec<WorkflowSchemaDiffChange>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowSchemaDiffItem {
+    pub kind: String,
+    pub key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowSchemaDiffChange {
+    pub kind: String,
+    pub key: String,
+    pub before_fingerprint: String,
+    pub after_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaSnapshotRecord {
+    pub snapshot_name: String,
+    pub profile: String,
+    pub database_id: String,
+    pub database_name: String,
+    pub owner: Option<String>,
+    pub purpose: Option<String>,
+    pub labels: Value,
+    pub created_at: DateTime<Utc>,
+    pub postgres_version: String,
+    pub digest_version: u32,
+    pub object_counts: SchemaObjectCounts,
+    pub notes: Option<String>,
+    pub digest: WorkflowSchemaDigest,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExplainQueryOutput {
     pub database_id: String,
     pub database_name: String,
@@ -292,6 +528,101 @@ struct SchemaDigestContent<'a> {
     digest_version: u32,
     tables: &'a [SchemaDigestTable],
     extensions: &'a [SchemaDigestExtension],
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaSnapshotSummary {
+    pub snapshot_name: String,
+    pub profile: String,
+    pub database_id: String,
+    pub database_name: String,
+    pub created_at: DateTime<Utc>,
+    pub postgres_version: String,
+    pub digest_version: u32,
+    pub object_counts: SchemaObjectCounts,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareForRepoOutput {
+    pub repo_path: String,
+    pub detected_framework: Option<String>,
+    pub config_path: Option<String>,
+    pub sandbox_target: Option<String>,
+    pub action_needed: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandWorkflowOutput {
+    pub database_id: String,
+    pub database_name: String,
+    pub command: Vec<String>,
+    pub elapsed_ms: u128,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidateMigrationOutput {
+    pub database_id: String,
+    pub database_name: String,
+    pub created_sandbox: bool,
+    pub command: Vec<String>,
+    pub elapsed_ms: u128,
+    pub exit_code: Option<i32>,
+    pub schema_diff: WorkflowSchemaDiffOutput,
+    pub stdout: String,
+    pub stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateMetadata {
+    pub template_name: String,
+    pub profile: String,
+    pub source_sandbox_id: String,
+    pub source_database_name: String,
+    pub created_at: DateTime<Utc>,
+    pub created_by: Option<String>,
+    pub owner: Option<String>,
+    pub postgres_version: String,
+    pub size_bytes: u64,
+    pub notes: Option<String>,
+    pub privacy_warning: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateTemplateOutput {
+    pub metadata: TemplateMetadata,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSandboxFromTemplateOutput {
+    pub database_id: String,
+    pub profile: String,
+    pub database_name: String,
+    pub role_name: String,
+    pub expires_at: DateTime<Utc>,
+    pub connection_string: String,
+    pub template_name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteTemplateOutput {
+    pub template_name: String,
+    pub deleted: bool,
 }
 
 #[derive(Debug)]
@@ -313,6 +644,38 @@ struct QueryExecutionResult {
     row_count: Option<u64>,
     rows: Vec<Value>,
     truncated: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RepoProjectConfig {
+    framework: String,
+    migration_command: Vec<String>,
+    seed_command: Option<Vec<String>>,
+    database_url_env: String,
+    prepared_at: DateTime<Utc>,
+}
+
+#[derive(Debug)]
+struct CommandRunResult {
+    command: Vec<String>,
+    elapsed_ms: u128,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+}
+
+#[derive(Debug)]
+struct TemplatePaths {
+    dump_path: PathBuf,
+    metadata_path: PathBuf,
+}
+
+#[derive(Debug)]
+struct SnapshotPaths {
+    metadata_path: PathBuf,
 }
 
 #[derive(Clone, Copy)]
@@ -363,6 +726,28 @@ impl<'a> FromSql<'a> for PgTimeTz {
 impl PostgresSandboxManager {
     pub fn new(config: SandboxConfig) -> Self {
         Self { config }
+    }
+
+    async fn get_owned_record(
+        &self,
+        profile_name: Option<String>,
+        database_id: Option<String>,
+        database_name: Option<String>,
+    ) -> anyhow::Result<(SandboxProfile, SandboxRecord)> {
+        let profile = find_profile(&self.config, profile_name.as_deref())?.clone();
+        let (client, connection_task) = connect_admin(&profile).await?;
+        ensure_metadata_table(&client).await?;
+        let selector = DatabaseSelector {
+            profile: None,
+            database_id,
+            database_name,
+        };
+        let record = find_record(&client, &profile.name, &selector)
+            .await?
+            .context("Database was not found in PGSandbox metadata.")?;
+        drop(client);
+        let _ = connection_task.await;
+        Ok((profile, record))
     }
 
     pub async fn create_database(
@@ -847,6 +1232,681 @@ impl PostgresSandboxManager {
         result
     }
 
+    pub async fn create_schema_snapshot(
+        &self,
+        input: CreateSchemaSnapshotInput,
+    ) -> anyhow::Result<WorkflowEnvelope<SchemaSnapshotSummary>> {
+        let snapshot_name = match validate_artifact_name(&input.snapshot_name, "snapshotName") {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(workflow_failure(
+                    "Schema snapshot was not created.",
+                    error,
+                    None,
+                ))
+            }
+        };
+        let (profile, record) = self
+            .get_owned_record(input.profile, input.database_id, input.database_name)
+            .await?;
+        let connection_string = build_connection_string(
+            &profile.admin_url,
+            &record.database_name,
+            &record.role_name,
+            &unprotect_role_password(&record.role_password, &profile)?,
+        )?;
+        let (client, connection_task) = connect_url(&connection_string).await?;
+        let postgres_version = postgres_version(&client).await?;
+        let digest = collect_schema_digest(&client).await?;
+        drop(client);
+        let _ = connection_task.await;
+
+        let snapshot = SchemaSnapshotRecord {
+            snapshot_name: snapshot_name.clone(),
+            profile: profile.name.clone(),
+            database_id: record.database_id.clone(),
+            database_name: record.database_name.clone(),
+            owner: record.owner.clone(),
+            purpose: record.purpose.clone(),
+            labels: record.labels.clone(),
+            created_at: Utc::now(),
+            postgres_version,
+            digest_version: digest.digest_version,
+            object_counts: digest.object_counts.clone(),
+            notes: input.notes,
+            digest,
+        };
+        let paths = snapshot_paths(&profile.name, &record.database_id, &snapshot_name)?;
+        write_json_file(&paths.metadata_path, &snapshot)?;
+        let summary = snapshot_summary(&snapshot);
+
+        Ok(workflow_success(
+            format!("Schema snapshot `{snapshot_name}` created."),
+            Some(SchemaChangeCounts::default()),
+            Vec::new(),
+            vec![snapshot_detail_handle(
+                &profile.name,
+                &record.database_id,
+                &snapshot_name,
+            )],
+            summary,
+        ))
+    }
+
+    pub async fn list_schema_snapshots(
+        &self,
+        input: ListSchemaSnapshotsInput,
+    ) -> anyhow::Result<WorkflowEnvelope<Vec<SchemaSnapshotSummary>>> {
+        let (profile, record) = self
+            .get_owned_record(input.profile, input.database_id, input.database_name)
+            .await?;
+        let snapshots = read_schema_snapshots(&profile.name, &record.database_id)?;
+
+        Ok(workflow_success(
+            format!("Found {} schema snapshot(s).", snapshots.len()),
+            None,
+            Vec::new(),
+            vec![json!({
+                "type": "schema-snapshot-list",
+                "profile": profile.name,
+                "databaseId": record.database_id
+            })],
+            snapshots
+                .into_iter()
+                .map(|snapshot| snapshot_summary(&snapshot))
+                .collect(),
+        ))
+    }
+
+    pub async fn delete_schema_snapshot(
+        &self,
+        input: DeleteSchemaSnapshotInput,
+    ) -> anyhow::Result<WorkflowEnvelope<Value>> {
+        let snapshot_name = match validate_artifact_name(&input.snapshot_name, "snapshotName") {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(workflow_failure(
+                    "Schema snapshot was not deleted.",
+                    error,
+                    None,
+                ))
+            }
+        };
+        let (profile, record) = self
+            .get_owned_record(input.profile, input.database_id, input.database_name)
+            .await?;
+        let paths = snapshot_paths(&profile.name, &record.database_id, &snapshot_name)?;
+        let deleted = remove_file_if_exists(&paths.metadata_path)?;
+
+        Ok(workflow_success(
+            if deleted {
+                format!("Schema snapshot `{snapshot_name}` deleted.")
+            } else {
+                format!("Schema snapshot `{snapshot_name}` did not exist.")
+            },
+            None,
+            Vec::new(),
+            vec![snapshot_detail_handle(
+                &profile.name,
+                &record.database_id,
+                &snapshot_name,
+            )],
+            json!({ "snapshotName": snapshot_name, "deleted": deleted }),
+        ))
+    }
+
+    pub async fn diff_schema_snapshot(
+        &self,
+        input: DiffSchemaSnapshotInput,
+    ) -> anyhow::Result<WorkflowEnvelope<WorkflowSchemaDiffOutput>> {
+        let snapshot_name = match validate_artifact_name(&input.snapshot_name, "snapshotName") {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(workflow_failure(
+                    "Schema snapshot diff was not produced.",
+                    error,
+                    None,
+                ))
+            }
+        };
+        let (profile, record) = self
+            .get_owned_record(input.profile, input.database_id, input.database_name)
+            .await?;
+        let snapshot =
+            match read_schema_snapshot(&profile.name, &record.database_id, &snapshot_name)? {
+                Some(snapshot) => snapshot,
+                None => {
+                    return Ok(workflow_failure(
+                        "Schema snapshot diff was not produced.",
+                        workflow_error(
+                            "snapshot_not_found",
+                            format!("Schema snapshot `{snapshot_name}` does not exist."),
+                            Some(
+                                "Create it with create_schema_snapshot before diffing.".to_string(),
+                            ),
+                        ),
+                        None,
+                    ))
+                }
+            };
+        let connection_string = build_connection_string(
+            &profile.admin_url,
+            &record.database_name,
+            &record.role_name,
+            &unprotect_role_password(&record.role_password, &profile)?,
+        )?;
+        let current = collect_schema_digest_for_url(&connection_string).await?;
+        let diff = diff_workflow_schema_digests(&snapshot.digest, &current);
+
+        Ok(workflow_success(
+            schema_diff_summary(&diff),
+            Some(diff.changed_objects.clone()),
+            Vec::new(),
+            vec![snapshot_detail_handle(
+                &profile.name,
+                &record.database_id,
+                &snapshot_name,
+            )],
+            diff,
+        ))
+    }
+
+    pub async fn prepare_for_repo(
+        &self,
+        input: PrepareForRepoInput,
+    ) -> anyhow::Result<WorkflowEnvelope<PrepareForRepoOutput>> {
+        let repo_path = PathBuf::from(&input.repo_path);
+        if !repo_path.is_dir() {
+            return Ok(workflow_failure(
+                "Repository was not prepared.",
+                workflow_error(
+                    "repo_not_found",
+                    format!("repoPath is not a directory: {}", repo_path.display()),
+                    Some("Pass the absolute path to the repository checkout.".to_string()),
+                ),
+                None,
+            ));
+        }
+
+        let detection = detect_django_repo(&repo_path)?;
+        let sandbox_target = if selector_has_database(&input.database_id, &input.database_name) {
+            let connection = self
+                .get_connection_string(DatabaseSelector {
+                    profile: input.profile.clone(),
+                    database_id: input.database_id.clone(),
+                    database_name: input.database_name.clone(),
+                })
+                .await?;
+            Some(mask_connection_string(&connection.connection_string))
+        } else {
+            None
+        };
+
+        if !detection {
+            return Ok(workflow_failure(
+                "Repository detection needs an explicit adapter.",
+                workflow_error(
+                    "repo_detection_uncertain",
+                    "Could not confidently detect a Django repo from manage.py and settings patterns.",
+                    Some("Pass explicit commands to run_migrations/seed_database or add Django project files.".to_string()),
+                ),
+                Some(PrepareForRepoOutput {
+                    repo_path: repo_path.display().to_string(),
+                    detected_framework: None,
+                    config_path: None,
+                    sandbox_target,
+                    action_needed: Some("Add manage.py plus a Django settings module, or provide explicit commands to the workflow tools.".to_string()),
+                }),
+            ));
+        }
+
+        let project_config = RepoProjectConfig {
+            framework: "django".to_string(),
+            migration_command: default_django_migration_command(),
+            seed_command: None,
+            database_url_env: "DATABASE_URL".to_string(),
+            prepared_at: Utc::now(),
+        };
+        let config_path = write_repo_project_config(&repo_path, &project_config)?;
+        let output = PrepareForRepoOutput {
+            repo_path: repo_path.display().to_string(),
+            detected_framework: Some("django".to_string()),
+            config_path: Some(config_path.display().to_string()),
+            sandbox_target,
+            action_needed: None,
+        };
+
+        Ok(workflow_success(
+            "Django repository prepared for PG Sandbox workflows.",
+            None,
+            Vec::new(),
+            vec![json!({
+                "type": "repo-config",
+                "framework": "django"
+            })],
+            output,
+        ))
+    }
+
+    pub async fn run_migrations(
+        &self,
+        input: RunMigrationsInput,
+    ) -> anyhow::Result<WorkflowEnvelope<CommandWorkflowOutput>> {
+        if !selector_has_database(&input.database_id, &input.database_name) {
+            return Ok(workflow_failure(
+                "Migrations were not run.",
+                workflow_error(
+                    "missing_sandbox",
+                    "run_migrations requires databaseId or databaseName.",
+                    Some("Create a sandbox first, then pass its databaseId.".to_string()),
+                ),
+                None,
+            ));
+        }
+        let repo_path = PathBuf::from(&input.repo_path);
+        if !repo_path.is_dir() {
+            return Ok(workflow_failure(
+                "Migrations were not run.",
+                repo_not_found_error(&repo_path),
+                None,
+            ));
+        }
+        let command = match resolve_migration_command(&repo_path, input.command)? {
+            Ok(command) => command,
+            Err(error) => return Ok(workflow_failure("Migrations were not run.", error, None)),
+        };
+        let timeout = workflow_timeout(input.timeout_seconds);
+        let connection = self
+            .get_connection_string(DatabaseSelector {
+                profile: input.profile,
+                database_id: input.database_id,
+                database_name: input.database_name,
+            })
+            .await?;
+        let command_result =
+            run_repo_command(&repo_path, &command, &connection.connection_string, timeout).await?;
+        let output = command_workflow_output(
+            &connection.database_id,
+            &connection.database_name,
+            command_result,
+        );
+        let ok = output.exit_code == Some(0);
+
+        Ok(if ok {
+            workflow_success(
+                "Migrations completed successfully.",
+                None,
+                Vec::new(),
+                vec![json!({
+                    "type": "migration-run",
+                    "databaseId": connection.database_id
+                })],
+                output,
+            )
+        } else {
+            workflow_failure(
+                "Migrations failed.",
+                workflow_error(
+                    "migration_failed",
+                    format!("Migration command exited with {:?}", output.exit_code),
+                    Some(
+                        "Inspect stderr/stdout in the result and rerun after fixing the migration."
+                            .to_string(),
+                    ),
+                ),
+                Some(output),
+            )
+        })
+    }
+
+    pub async fn validate_migration(
+        &self,
+        input: ValidateMigrationInput,
+    ) -> anyhow::Result<WorkflowEnvelope<ValidateMigrationOutput>> {
+        let repo_path = PathBuf::from(&input.repo_path);
+        if !repo_path.is_dir() {
+            return Ok(workflow_failure(
+                "Migration validation was not run.",
+                repo_not_found_error(&repo_path),
+                None,
+            ));
+        }
+        let command = match resolve_migration_command(&repo_path, input.command)? {
+            Ok(command) => command,
+            Err(error) => {
+                return Ok(workflow_failure(
+                    "Migration validation was not run.",
+                    error,
+                    None,
+                ))
+            }
+        };
+        let timeout = workflow_timeout(input.timeout_seconds);
+        let created_sandbox = !selector_has_database(&input.database_id, &input.database_name);
+        let connection = if created_sandbox {
+            let created = self
+                .create_database(CreateDatabaseInput {
+                    profile: input.profile,
+                    name_hint: Some(
+                        input
+                            .name_hint
+                            .unwrap_or_else(|| "django migration validation".to_string()),
+                    ),
+                    ttl_minutes: input.ttl_minutes,
+                    owner: input.owner,
+                    labels: input.labels,
+                })
+                .await?;
+            ConnectionStringOutput {
+                database_id: created.database_id,
+                database_name: created.database_name,
+                expires_at: created.expires_at,
+                connection_string: created.connection_string,
+            }
+        } else {
+            self.get_connection_string(DatabaseSelector {
+                profile: input.profile,
+                database_id: input.database_id,
+                database_name: input.database_name,
+            })
+            .await?
+        };
+        let before = collect_schema_digest_for_url(&connection.connection_string).await?;
+        let command_result =
+            run_repo_command(&repo_path, &command, &connection.connection_string, timeout).await?;
+        let after = collect_schema_digest_for_url(&connection.connection_string).await?;
+        let diff = diff_workflow_schema_digests(&before, &after);
+        let ok = command_result.exit_code == Some(0);
+        let output = validate_migration_output(
+            &connection.database_id,
+            &connection.database_name,
+            created_sandbox,
+            command_result,
+            diff.clone(),
+        );
+
+        Ok(if ok {
+            workflow_success(
+                "Migration validation completed successfully.",
+                Some(diff.changed_objects),
+                Vec::new(),
+                vec![json!({
+                    "type": "migration-validation",
+                    "databaseId": connection.database_id,
+                    "createdSandbox": created_sandbox
+                })],
+                output,
+            )
+        } else {
+            workflow_failure_with_changes(
+                "Migration validation failed.",
+                diff.changed_objects,
+                workflow_error(
+                    "migration_failed",
+                    format!("Migration command exited with {:?}", output.exit_code),
+                    Some(
+                        "Inspect stderr/stdout in the result and the schema diff before retrying."
+                            .to_string(),
+                    ),
+                ),
+                Some(output),
+            )
+        })
+    }
+
+    pub async fn seed_database(
+        &self,
+        input: SeedDatabaseInput,
+    ) -> anyhow::Result<WorkflowEnvelope<CommandWorkflowOutput>> {
+        if !selector_has_database(&input.database_id, &input.database_name) {
+            return Ok(workflow_failure(
+                "Seed command was not run.",
+                workflow_error(
+                    "missing_sandbox",
+                    "seed_database requires databaseId or databaseName.",
+                    Some("Create a sandbox first, then pass its databaseId.".to_string()),
+                ),
+                None,
+            ));
+        }
+        let repo_path = PathBuf::from(&input.repo_path);
+        if !repo_path.is_dir() {
+            return Ok(workflow_failure(
+                "Seed command was not run.",
+                repo_not_found_error(&repo_path),
+                None,
+            ));
+        }
+        let command = match resolve_seed_command(&repo_path, input.command)? {
+            Ok(command) => command,
+            Err(error) => return Ok(workflow_failure("Seed command was not run.", error, None)),
+        };
+        let timeout = workflow_timeout(input.timeout_seconds);
+        let connection = self
+            .get_connection_string(DatabaseSelector {
+                profile: input.profile,
+                database_id: input.database_id,
+                database_name: input.database_name,
+            })
+            .await?;
+        let command_result =
+            run_repo_command(&repo_path, &command, &connection.connection_string, timeout).await?;
+        let output = command_workflow_output(
+            &connection.database_id,
+            &connection.database_name,
+            command_result,
+        );
+
+        Ok(if output.exit_code == Some(0) {
+            workflow_success(
+                "Seed command completed successfully.",
+                None,
+                Vec::new(),
+                vec![json!({
+                    "type": "seed-run",
+                    "databaseId": connection.database_id
+                })],
+                output,
+            )
+        } else {
+            workflow_failure(
+                "Seed command failed.",
+                workflow_error(
+                    "seed_failed",
+                    format!("Seed command exited with {:?}", output.exit_code),
+                    Some("Inspect stderr/stdout in the result before retrying.".to_string()),
+                ),
+                Some(output),
+            )
+        })
+    }
+
+    pub async fn create_template_from_sandbox(
+        &self,
+        input: CreateTemplateFromSandboxInput,
+    ) -> anyhow::Result<WorkflowEnvelope<CreateTemplateOutput>> {
+        let template_name = match validate_artifact_name(&input.template_name, "templateName") {
+            Ok(value) => value,
+            Err(error) => return Ok(workflow_failure("Template was not created.", error, None)),
+        };
+        let (profile, record) = self
+            .get_owned_record(input.profile, input.database_id, input.database_name)
+            .await?;
+        let connection_string = build_connection_string(
+            &profile.admin_url,
+            &record.database_name,
+            &record.role_name,
+            &unprotect_role_password(&record.role_password, &profile)?,
+        )?;
+        let (client, connection_task) = connect_url(&connection_string).await?;
+        let postgres_version = postgres_version(&client).await?;
+        drop(client);
+        let _ = connection_task.await;
+
+        let paths = template_paths(&profile.name, &template_name)?;
+        dump_database_to_file(&connection_string, &paths.dump_path).await?;
+        let size_bytes = fs::metadata(&paths.dump_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let metadata = TemplateMetadata {
+            template_name: template_name.clone(),
+            profile: profile.name.clone(),
+            source_sandbox_id: record.database_id.clone(),
+            source_database_name: record.database_name.clone(),
+            created_at: Utc::now(),
+            created_by: input.created_by,
+            owner: record.owner.clone(),
+            postgres_version,
+            size_bytes,
+            notes: input.notes,
+            privacy_warning: TEMPLATE_PRIVACY_WARNING.to_string(),
+        };
+        write_json_file(&paths.metadata_path, &metadata)?;
+
+        Ok(workflow_success(
+            format!("Template `{template_name}` created."),
+            None,
+            vec![TEMPLATE_PRIVACY_WARNING.to_string()],
+            vec![template_detail_handle(&profile.name, &template_name)],
+            CreateTemplateOutput { metadata },
+        ))
+    }
+
+    pub async fn create_sandbox_from_template(
+        &self,
+        input: CreateSandboxFromTemplateInput,
+    ) -> anyhow::Result<WorkflowEnvelope<CreateSandboxFromTemplateOutput>> {
+        let template_name = match validate_artifact_name(&input.template_name, "templateName") {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(workflow_failure(
+                    "Sandbox was not created from template.",
+                    error,
+                    None,
+                ))
+            }
+        };
+        let profile = find_profile(&self.config, input.profile.as_deref())?.clone();
+        let paths = template_paths(&profile.name, &template_name)?;
+        let metadata = match read_json_file::<TemplateMetadata>(&paths.metadata_path)? {
+            Some(metadata) => metadata,
+            None => {
+                return Ok(workflow_failure(
+                    "Sandbox was not created from template.",
+                    workflow_error(
+                        "template_not_found",
+                        format!("Template `{template_name}` does not exist for profile {}.", profile.name),
+                        Some("Create it with create_template_from_sandbox or choose another templateName.".to_string()),
+                    ),
+                    None,
+                ))
+            }
+        };
+        let created = self
+            .create_database(CreateDatabaseInput {
+                profile: Some(profile.name.clone()),
+                name_hint: input.name_hint.or_else(|| Some(template_name.clone())),
+                ttl_minutes: input.ttl_minutes,
+                owner: input.owner,
+                labels: input.labels,
+            })
+            .await?;
+        if let Err(error) =
+            restore_database_from_file(&paths.dump_path, &created.connection_string).await
+        {
+            let cleanup_result = self
+                .delete_database(DatabaseSelector {
+                    profile: Some(created.profile.clone()),
+                    database_id: Some(created.database_id.clone()),
+                    database_name: None,
+                })
+                .await;
+            return match cleanup_result {
+                Ok(_) => Ok(workflow_failure(
+                    "Sandbox restore failed; created sandbox was deleted.",
+                    workflow_error(
+                        "template_restore_failed",
+                        error.to_string(),
+                        Some("Check that pg_restore is installed and the template artifact is valid.".to_string()),
+                    ),
+                    None,
+                )),
+                Err(cleanup_error) => Err(anyhow::anyhow!(
+                    "template restore failed and cleanup also failed for {}: {error}; cleanup error: {cleanup_error}",
+                    created.database_name
+                )),
+            };
+        }
+
+        Ok(workflow_success(
+            format!(
+                "Sandbox created from template `{}`.",
+                metadata.template_name
+            ),
+            None,
+            vec![metadata.privacy_warning.clone()],
+            vec![template_detail_handle(&profile.name, &template_name)],
+            CreateSandboxFromTemplateOutput {
+                database_id: created.database_id,
+                profile: created.profile,
+                database_name: created.database_name,
+                role_name: created.role_name,
+                expires_at: created.expires_at,
+                connection_string: created.connection_string,
+                template_name,
+            },
+        ))
+    }
+
+    pub async fn list_templates(
+        &self,
+        input: ListTemplatesInput,
+    ) -> anyhow::Result<WorkflowEnvelope<Vec<TemplateMetadata>>> {
+        let profile = find_profile(&self.config, input.profile.as_deref())?.clone();
+        let templates = read_templates(&profile.name)?;
+
+        Ok(workflow_success(
+            format!("Found {} template(s).", templates.len()),
+            None,
+            Vec::new(),
+            vec![json!({
+                "type": "template-list",
+                "profile": profile.name
+            })],
+            templates,
+        ))
+    }
+
+    pub async fn delete_template(
+        &self,
+        input: DeleteTemplateInput,
+    ) -> anyhow::Result<WorkflowEnvelope<DeleteTemplateOutput>> {
+        let template_name = match validate_artifact_name(&input.template_name, "templateName") {
+            Ok(value) => value,
+            Err(error) => return Ok(workflow_failure("Template was not deleted.", error, None)),
+        };
+        let profile = find_profile(&self.config, input.profile.as_deref())?.clone();
+        let paths = template_paths(&profile.name, &template_name)?;
+        let deleted_dump = remove_file_if_exists(&paths.dump_path)?;
+        let deleted_metadata = remove_file_if_exists(&paths.metadata_path)?;
+        let deleted = deleted_dump || deleted_metadata;
+
+        Ok(workflow_success(
+            if deleted {
+                format!("Template `{template_name}` deleted.")
+            } else {
+                format!("Template `{template_name}` did not exist.")
+            },
+            None,
+            Vec::new(),
+            vec![template_detail_handle(&profile.name, &template_name)],
+            DeleteTemplateOutput {
+                template_name,
+                deleted,
+            },
+        ))
+    }
+
     pub async fn cleanup_expired(
         &self,
         input: CleanupExpiredInput,
@@ -961,6 +2021,958 @@ impl PostgresSandboxManager {
             failures: Some(failures),
         })
     }
+}
+
+fn workflow_success<T: Serialize>(
+    summary: impl Into<String>,
+    changed_objects: Option<SchemaChangeCounts>,
+    warnings: Vec<String>,
+    detail_handles: Vec<Value>,
+    result: T,
+) -> WorkflowEnvelope<T> {
+    WorkflowEnvelope {
+        ok: true,
+        summary: summary.into(),
+        changed_objects,
+        warnings,
+        errors: Vec::new(),
+        detail_handles,
+        result: Some(result),
+    }
+}
+
+fn workflow_failure<T: Serialize>(
+    summary: impl Into<String>,
+    error: WorkflowError,
+    result: Option<T>,
+) -> WorkflowEnvelope<T> {
+    workflow_failure_with_changes(summary, SchemaChangeCounts::default(), error, result)
+}
+
+fn workflow_failure_with_changes<T: Serialize>(
+    summary: impl Into<String>,
+    changed_objects: SchemaChangeCounts,
+    error: WorkflowError,
+    result: Option<T>,
+) -> WorkflowEnvelope<T> {
+    WorkflowEnvelope {
+        ok: false,
+        summary: summary.into(),
+        changed_objects: Some(changed_objects),
+        warnings: Vec::new(),
+        errors: vec![error],
+        detail_handles: Vec::new(),
+        result,
+    }
+}
+
+fn workflow_error(
+    code: impl Into<String>,
+    message: impl Into<String>,
+    hint: Option<String>,
+) -> WorkflowError {
+    WorkflowError {
+        code: code.into(),
+        message: message.into(),
+        hint,
+    }
+}
+
+fn repo_not_found_error(repo_path: &Path) -> WorkflowError {
+    workflow_error(
+        "repo_not_found",
+        format!("repoPath is not a directory: {}", repo_path.display()),
+        Some("Pass the absolute path to the repository checkout.".to_string()),
+    )
+}
+
+fn selector_has_database(database_id: &Option<String>, database_name: &Option<String>) -> bool {
+    database_id.is_some() || database_name.is_some()
+}
+
+async fn collect_schema_digest_for_url(database_url: &str) -> anyhow::Result<WorkflowSchemaDigest> {
+    let (client, connection_task) = connect_url(database_url).await?;
+    let digest = collect_schema_digest(&client).await?;
+    drop(client);
+    let _ = connection_task.await;
+    Ok(digest)
+}
+
+async fn collect_schema_digest(client: &Client) -> anyhow::Result<WorkflowSchemaDigest> {
+    let table_rows = client
+        .query(
+            r#"
+              SELECT table_schema, table_name, table_type
+              FROM information_schema.tables
+              WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+              ORDER BY table_schema, table_name
+            "#,
+            &[],
+        )
+        .await?;
+    let column_rows = client
+        .query(
+            r#"
+              SELECT table_schema, table_name, column_name, ordinal_position,
+                     data_type, udt_name, is_nullable, column_default
+              FROM information_schema.columns
+              WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+              ORDER BY table_schema, table_name, ordinal_position
+            "#,
+            &[],
+        )
+        .await?;
+    let index_rows = client
+        .query(
+            r#"
+              SELECT schemaname, tablename, indexname, indexdef
+              FROM pg_indexes
+              WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+              ORDER BY schemaname, tablename, indexname
+            "#,
+            &[],
+        )
+        .await?;
+    let extension_rows = client
+        .query(
+            "SELECT extname, extversion FROM pg_extension ORDER BY extname",
+            &[],
+        )
+        .await?;
+
+    let mut tables = Vec::new();
+    for row in table_rows {
+        let schema: String = row.get("table_schema");
+        let name: String = row.get("table_name");
+        let table_type: String = row.get("table_type");
+        tables.push(schema_object_digest(
+            "table",
+            format!("{schema}.{name}"),
+            json!({
+                "schema": schema,
+                "name": name,
+                "tableType": table_type
+            }),
+        )?);
+    }
+
+    let mut columns = Vec::new();
+    for row in column_rows {
+        let schema: String = row.get("table_schema");
+        let table: String = row.get("table_name");
+        let name: String = row.get("column_name");
+        let ordinal_position: i32 = row.get("ordinal_position");
+        let data_type: String = row.get("data_type");
+        let udt_name: String = row.get("udt_name");
+        let is_nullable: String = row.get("is_nullable");
+        let column_default: Option<String> = row.get("column_default");
+        columns.push(schema_object_digest(
+            "column",
+            format!("{schema}.{table}.{name}"),
+            json!({
+                "schema": schema,
+                "table": table,
+                "name": name,
+                "ordinalPosition": ordinal_position,
+                "dataType": data_type,
+                "udtName": udt_name,
+                "isNullable": is_nullable,
+                "columnDefault": column_default
+            }),
+        )?);
+    }
+
+    let mut indexes = Vec::new();
+    for row in index_rows {
+        let schema: String = row.get("schemaname");
+        let table: String = row.get("tablename");
+        let name: String = row.get("indexname");
+        let definition: String = row.get("indexdef");
+        indexes.push(schema_object_digest(
+            "index",
+            format!("{schema}.{table}.{name}"),
+            json!({
+                "schema": schema,
+                "table": table,
+                "name": name,
+                "definition": definition
+            }),
+        )?);
+    }
+
+    let mut extensions = Vec::new();
+    for row in extension_rows {
+        let name: String = row.get("extname");
+        let version: String = row.get("extversion");
+        extensions.push(schema_object_digest(
+            "extension",
+            name.clone(),
+            json!({
+                "name": name,
+                "version": version
+            }),
+        )?);
+    }
+
+    let object_counts = SchemaObjectCounts {
+        tables: tables.len(),
+        columns: columns.len(),
+        indexes: indexes.len(),
+        extensions: extensions.len(),
+    };
+    let canonical = json!({
+        "digestVersion": SCHEMA_DIGEST_VERSION,
+        "objectCounts": object_counts.clone(),
+        "tables": tables.clone(),
+        "columns": columns.clone(),
+        "indexes": indexes.clone(),
+        "extensions": extensions.clone()
+    });
+    let fingerprint = fingerprint_json(&canonical)?;
+
+    Ok(WorkflowSchemaDigest {
+        digest_version: SCHEMA_DIGEST_VERSION,
+        fingerprint,
+        object_counts,
+        tables,
+        columns,
+        indexes,
+        extensions,
+    })
+}
+
+fn schema_object_digest(
+    kind: impl Into<String>,
+    key: impl Into<String>,
+    summary: Value,
+) -> anyhow::Result<SchemaObjectDigest> {
+    let kind = kind.into();
+    let key = key.into();
+    let fingerprint = fingerprint_json(&json!({
+        "kind": kind,
+        "key": key,
+        "summary": summary
+    }))?;
+    Ok(SchemaObjectDigest {
+        kind,
+        key,
+        fingerprint,
+        summary,
+    })
+}
+
+fn fingerprint_json(value: &Value) -> anyhow::Result<String> {
+    let bytes = serde_json::to_vec(value)?;
+    let digest = Sha256::digest(bytes);
+    Ok(bytes_to_hex(&digest))
+}
+
+fn diff_workflow_schema_digests(
+    from: &WorkflowSchemaDigest,
+    to: &WorkflowSchemaDigest,
+) -> WorkflowSchemaDiffOutput {
+    let from_objects = schema_object_map(from);
+    let to_objects = schema_object_map(to);
+    let mut added_all = Vec::new();
+    let mut removed_all = Vec::new();
+    let mut changed_all = Vec::new();
+
+    for (key, object) in &to_objects {
+        if !from_objects.contains_key(key) {
+            added_all.push(diff_item(object));
+        }
+    }
+    for (key, object) in &from_objects {
+        match to_objects.get(key) {
+            Some(after) if after.fingerprint != object.fingerprint => {
+                changed_all.push(WorkflowSchemaDiffChange {
+                    kind: object.kind.clone(),
+                    key: object.key.clone(),
+                    before_fingerprint: object.fingerprint.clone(),
+                    after_fingerprint: after.fingerprint.clone(),
+                });
+            }
+            None => removed_all.push(diff_item(object)),
+            _ => {}
+        }
+    }
+
+    let changed_objects = SchemaChangeCounts {
+        added: added_all.len(),
+        removed: removed_all.len(),
+        changed: changed_all.len(),
+    };
+    let truncated = added_all.len() > MAX_SCHEMA_DIFF_ITEMS
+        || removed_all.len() > MAX_SCHEMA_DIFF_ITEMS
+        || changed_all.len() > MAX_SCHEMA_DIFF_ITEMS;
+
+    WorkflowSchemaDiffOutput {
+        from_fingerprint: from.fingerprint.clone(),
+        to_fingerprint: to.fingerprint.clone(),
+        changed_objects,
+        added: added_all.into_iter().take(MAX_SCHEMA_DIFF_ITEMS).collect(),
+        removed: removed_all
+            .into_iter()
+            .take(MAX_SCHEMA_DIFF_ITEMS)
+            .collect(),
+        changed: changed_all
+            .into_iter()
+            .take(MAX_SCHEMA_DIFF_ITEMS)
+            .collect(),
+        truncated,
+    }
+}
+
+fn schema_object_map(digest: &WorkflowSchemaDigest) -> BTreeMap<String, SchemaObjectDigest> {
+    digest
+        .tables
+        .iter()
+        .chain(digest.columns.iter())
+        .chain(digest.indexes.iter())
+        .chain(digest.extensions.iter())
+        .map(|object| (format!("{}\0{}", object.kind, object.key), object.clone()))
+        .collect()
+}
+
+fn diff_item(object: &SchemaObjectDigest) -> WorkflowSchemaDiffItem {
+    WorkflowSchemaDiffItem {
+        kind: object.kind.clone(),
+        key: object.key.clone(),
+    }
+}
+
+fn schema_diff_summary(diff: &WorkflowSchemaDiffOutput) -> String {
+    format!(
+        "Schema diff: {} added, {} removed, {} changed.",
+        diff.changed_objects.added, diff.changed_objects.removed, diff.changed_objects.changed
+    )
+}
+
+async fn postgres_version(client: &Client) -> anyhow::Result<String> {
+    let row = client.query_one("SHOW server_version", &[]).await?;
+    Ok(row.get::<_, String>(0))
+}
+
+fn default_django_migration_command() -> Vec<String> {
+    vec![
+        "python".to_string(),
+        "manage.py".to_string(),
+        "migrate".to_string(),
+        "--noinput".to_string(),
+    ]
+}
+
+fn detect_django_repo(repo_path: &Path) -> anyhow::Result<bool> {
+    let manage_py = repo_path.join("manage.py");
+    if !manage_py.is_file() {
+        return Ok(false);
+    }
+    let manage_text = fs::read_to_string(&manage_py).unwrap_or_default();
+    if manage_text.contains("DJANGO_SETTINGS_MODULE") {
+        return Ok(true);
+    }
+    for entry in fs::read_dir(repo_path)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() && path.join("settings.py").is_file() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn repo_project_config_path(repo_path: &Path) -> PathBuf {
+    repo_path.join(".pgsandbox").join("project.json")
+}
+
+fn write_repo_project_config(
+    repo_path: &Path,
+    config: &RepoProjectConfig,
+) -> anyhow::Result<PathBuf> {
+    let path = repo_project_config_path(repo_path);
+    write_json_file(&path, config)?;
+    Ok(path)
+}
+
+fn read_repo_project_config(repo_path: &Path) -> anyhow::Result<Option<RepoProjectConfig>> {
+    read_json_file(&repo_project_config_path(repo_path))
+}
+
+fn resolve_migration_command(
+    repo_path: &Path,
+    input_command: Option<Vec<String>>,
+) -> anyhow::Result<Result<Vec<String>, WorkflowError>> {
+    let command = match input_command {
+        Some(command) => command,
+        None => match read_repo_project_config(repo_path)? {
+            Some(config) => config.migration_command,
+            None => {
+                return Ok(Err(workflow_error(
+                    "missing_migration_command",
+                    "No migration command was provided and .pgsandbox/project.json is missing.",
+                    Some(
+                        "Run prepare_for_repo or pass an explicit Django migrate command."
+                            .to_string(),
+                    ),
+                )))
+            }
+        },
+    };
+    if !command_is_bounded(&command) {
+        return Ok(Err(workflow_error(
+            "unclear_command",
+            "Migration command is empty or too large.",
+            Some("Pass a short argv array such as [\"python\", \"manage.py\", \"migrate\", \"--noinput\"].".to_string()),
+        )));
+    }
+    if !is_known_django_migration_command(&command) {
+        return Ok(Err(workflow_error(
+            "unsafe_migration_command",
+            "Only explicit Django migrate commands are allowed for run_migrations and validate_migration.",
+            Some("Use python manage.py migrate --noinput, or configure that command in .pgsandbox/project.json.".to_string()),
+        )));
+    }
+    Ok(Ok(command))
+}
+
+fn resolve_seed_command(
+    repo_path: &Path,
+    input_command: Option<Vec<String>>,
+) -> anyhow::Result<Result<Vec<String>, WorkflowError>> {
+    let command = match input_command {
+        Some(command) => command,
+        None => match read_repo_project_config(repo_path)? {
+            Some(config) => match config.seed_command {
+                Some(command) => command,
+                None => {
+                    return Ok(Err(workflow_error(
+                        "missing_seed_command",
+                        "No seed command was provided and .pgsandbox/project.json has no seedCommand.",
+                        Some("Pass an explicit seed command argv array or add seedCommand to the project config.".to_string()),
+                    )))
+                }
+            },
+            None => {
+                return Ok(Err(workflow_error(
+                    "missing_seed_command",
+                    "No seed command was provided and .pgsandbox/project.json is missing.",
+                    Some("Pass an explicit seed command argv array or run prepare_for_repo and add seedCommand.".to_string()),
+                )))
+            }
+        },
+    };
+    if !command_is_bounded(&command) {
+        return Ok(Err(workflow_error(
+            "unclear_command",
+            "Seed command is empty or too large.",
+            Some("Pass a short argv array. Commands are executed without a shell.".to_string()),
+        )));
+    }
+    Ok(Ok(command))
+}
+
+fn command_is_bounded(command: &[String]) -> bool {
+    if command.is_empty() || command.len() > 16 {
+        return false;
+    }
+    let total_len = command.iter().map(String::len).sum::<usize>();
+    total_len <= 2_048
+        && command.iter().all(|part| {
+            !part.is_empty()
+                && part.len() <= 256
+                && !part.contains('\0')
+                && !part.contains('\n')
+                && !part.contains('\r')
+        })
+}
+
+fn is_known_django_migration_command(command: &[String]) -> bool {
+    if command.len() < 3 {
+        return false;
+    }
+    let (manage_index, migrate_index) = if command[0] == "manage.py" || command[0] == "./manage.py"
+    {
+        (0, 1)
+    } else if is_python_command(&command[0])
+        && command.get(1).map(String::as_str) == Some("manage.py")
+    {
+        (1, 2)
+    } else {
+        return false;
+    };
+    if command.get(manage_index).map(String::as_str) != Some("manage.py")
+        && command.get(manage_index).map(String::as_str) != Some("./manage.py")
+    {
+        return false;
+    }
+    if command.get(migrate_index).map(String::as_str) != Some("migrate") {
+        return false;
+    }
+    command[migrate_index + 1..].iter().all(|arg| {
+        !arg.contains(';')
+            && !arg.contains('&')
+            && !arg.contains('|')
+            && !arg.contains('>')
+            && !arg.contains('<')
+            && !arg.starts_with("--database")
+            && !arg.starts_with("--settings")
+            && !arg.starts_with("--pythonpath")
+    })
+}
+
+fn is_python_command(command: &str) -> bool {
+    let executable = Path::new(command)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(command);
+    executable == "python"
+        || executable == "python3"
+        || executable
+            .strip_prefix("python3.")
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn workflow_timeout(timeout_seconds: Option<u64>) -> StdDuration {
+    StdDuration::from_secs(
+        timeout_seconds
+            .unwrap_or(DEFAULT_WORKFLOW_TIMEOUT_SECONDS)
+            .min(MAX_WORKFLOW_TIMEOUT_SECONDS),
+    )
+}
+
+async fn run_repo_command(
+    repo_path: &Path,
+    command: &[String],
+    database_url: &str,
+    timeout: StdDuration,
+) -> anyhow::Result<CommandRunResult> {
+    if !repo_path.is_dir() {
+        anyhow::bail!("repoPath is not a directory: {}", repo_path.display());
+    }
+    if !command_is_bounded(command) {
+        anyhow::bail!("command is empty or too large");
+    }
+    let env = database_command_env(database_url)?;
+    let started = std::time::Instant::now();
+    let mut child = Command::new(&command[0])
+        .args(&command[1..])
+        .current_dir(repo_path)
+        .envs(env.iter())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("failed to start command `{}`", command[0]))?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("stdout pipe was not available")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("stderr pipe was not available")?;
+    let stdout_task = tokio::spawn(read_bounded_output(stdout));
+    let stderr_task = tokio::spawn(read_bounded_output(stderr));
+    let status = match time::timeout(timeout, child.wait()).await {
+        Ok(status) => status?,
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let (stdout, stdout_truncated) = stdout_task.await.context("stdout task failed")??;
+            let (stderr, stderr_truncated) = stderr_task.await.context("stderr task failed")??;
+            return Ok(CommandRunResult {
+                command: command.to_vec(),
+                elapsed_ms: started.elapsed().as_millis(),
+                exit_code: None,
+                stdout,
+                stderr: append_timeout_message(stderr, timeout),
+                stdout_truncated,
+                stderr_truncated,
+            });
+        }
+    };
+    let (stdout, stdout_truncated) = stdout_task.await.context("stdout task failed")??;
+    let (stderr, stderr_truncated) = stderr_task.await.context("stderr task failed")??;
+    Ok(CommandRunResult {
+        command: command.to_vec(),
+        elapsed_ms: started.elapsed().as_millis(),
+        exit_code: status.code(),
+        stdout,
+        stderr,
+        stdout_truncated,
+        stderr_truncated,
+    })
+}
+
+async fn read_bounded_output<R>(mut reader: R) -> anyhow::Result<(String, bool)>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut output = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let count = reader.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        let remaining = MAX_COMMAND_OUTPUT_BYTES.saturating_sub(output.len());
+        if remaining > 0 {
+            let take = remaining.min(count);
+            output.extend_from_slice(&buffer[..take]);
+            if take < count {
+                truncated = true;
+            }
+        } else {
+            truncated = true;
+        }
+    }
+    Ok((String::from_utf8_lossy(&output).to_string(), truncated))
+}
+
+fn append_timeout_message(mut stderr: String, timeout: StdDuration) -> String {
+    if !stderr.ends_with('\n') && !stderr.is_empty() {
+        stderr.push('\n');
+    }
+    stderr.push_str(&format!(
+        "PGSandbox command timed out after {} seconds.",
+        timeout.as_secs()
+    ));
+    stderr
+}
+
+fn command_workflow_output(
+    database_id: &str,
+    database_name: &str,
+    result: CommandRunResult,
+) -> CommandWorkflowOutput {
+    CommandWorkflowOutput {
+        database_id: database_id.to_string(),
+        database_name: database_name.to_string(),
+        command: result.command,
+        elapsed_ms: result.elapsed_ms,
+        exit_code: result.exit_code,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        stdout_truncated: result.stdout_truncated,
+        stderr_truncated: result.stderr_truncated,
+    }
+}
+
+fn validate_migration_output(
+    database_id: &str,
+    database_name: &str,
+    created_sandbox: bool,
+    result: CommandRunResult,
+    schema_diff: WorkflowSchemaDiffOutput,
+) -> ValidateMigrationOutput {
+    ValidateMigrationOutput {
+        database_id: database_id.to_string(),
+        database_name: database_name.to_string(),
+        created_sandbox,
+        command: result.command,
+        elapsed_ms: result.elapsed_ms,
+        exit_code: result.exit_code,
+        schema_diff,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        stdout_truncated: result.stdout_truncated,
+        stderr_truncated: result.stderr_truncated,
+    }
+}
+
+fn database_command_env(database_url: &str) -> anyhow::Result<BTreeMap<String, String>> {
+    let connection = pg_tool_connection_from_url(database_url)?;
+    let mut env = connection.env;
+    env.insert("PGDATABASE".to_string(), connection.database);
+    env.insert("DATABASE_URL".to_string(), database_url.to_string());
+    env.insert(
+        "PGSANDBOX_DATABASE_URL".to_string(),
+        database_url.to_string(),
+    );
+    Ok(env)
+}
+
+fn pgsandbox_state_root() -> anyhow::Result<PathBuf> {
+    match std::env::var_os("PGSANDBOX_HOME") {
+        Some(path) => Ok(PathBuf::from(path)),
+        None => Ok(dirs::home_dir()
+            .context("could not resolve home directory for ~/.pgsandbox")?
+            .join(".pgsandbox")),
+    }
+}
+
+fn validate_artifact_name(value: &str, field: &str) -> Result<String, WorkflowError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(workflow_error(
+            "invalid_artifact_name",
+            format!("{field} cannot be empty."),
+            Some("Use letters, numbers, dots, underscores, or hyphens.".to_string()),
+        ));
+    }
+    if trimmed.len() > 80
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || !trimmed.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+    {
+        return Err(workflow_error(
+            "invalid_artifact_name",
+            format!("{field} must be 1-80 safe filename characters."),
+            Some(
+                "Use letters, numbers, dots, underscores, or hyphens; do not include paths."
+                    .to_string(),
+            ),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn profile_artifact_component(profile: &str) -> String {
+    validate_artifact_name(profile, "profile")
+        .unwrap_or_else(|_| slugify_profile_component(profile))
+}
+
+fn slugify_profile_component(profile: &str) -> String {
+    let slug = profile
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if slug.is_empty() {
+        "profile".to_string()
+    } else {
+        slug
+    }
+}
+
+fn template_paths(profile: &str, template_name: &str) -> anyhow::Result<TemplatePaths> {
+    let profile = profile_artifact_component(profile);
+    let dir = pgsandbox_state_root()?.join("templates").join(profile);
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create template directory {}", dir.display()))?;
+    Ok(TemplatePaths {
+        dump_path: dir.join(format!("{template_name}.dump")),
+        metadata_path: dir.join(format!("{template_name}.json")),
+    })
+}
+
+fn snapshot_paths(
+    profile: &str,
+    database_id: &str,
+    snapshot_name: &str,
+) -> anyhow::Result<SnapshotPaths> {
+    let profile = profile_artifact_component(profile);
+    let dir = pgsandbox_state_root()?
+        .join("schema-snapshots")
+        .join(profile)
+        .join(database_id);
+    fs::create_dir_all(&dir).with_context(|| {
+        format!(
+            "failed to create schema snapshot directory {}",
+            dir.display()
+        )
+    })?;
+    Ok(SnapshotPaths {
+        metadata_path: dir.join(format!("{snapshot_name}.json")),
+    })
+}
+
+fn read_schema_snapshot(
+    profile: &str,
+    database_id: &str,
+    snapshot_name: &str,
+) -> anyhow::Result<Option<SchemaSnapshotRecord>> {
+    let paths = snapshot_paths(profile, database_id, snapshot_name)?;
+    read_json_file(&paths.metadata_path)
+}
+
+fn read_schema_snapshots(
+    profile: &str,
+    database_id: &str,
+) -> anyhow::Result<Vec<SchemaSnapshotRecord>> {
+    let dir = pgsandbox_state_root()?
+        .join("schema-snapshots")
+        .join(profile_artifact_component(profile))
+        .join(database_id);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut snapshots = Vec::new();
+    for entry in fs::read_dir(&dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()) == Some("json") {
+            if let Some(snapshot) = read_json_file::<SchemaSnapshotRecord>(&path)? {
+                snapshots.push(snapshot);
+            }
+        }
+    }
+    snapshots.sort_by(|left, right| left.snapshot_name.cmp(&right.snapshot_name));
+    Ok(snapshots)
+}
+
+fn snapshot_summary(snapshot: &SchemaSnapshotRecord) -> SchemaSnapshotSummary {
+    SchemaSnapshotSummary {
+        snapshot_name: snapshot.snapshot_name.clone(),
+        profile: snapshot.profile.clone(),
+        database_id: snapshot.database_id.clone(),
+        database_name: snapshot.database_name.clone(),
+        created_at: snapshot.created_at,
+        postgres_version: snapshot.postgres_version.clone(),
+        digest_version: snapshot.digest_version,
+        object_counts: snapshot.object_counts.clone(),
+        notes: snapshot.notes.clone(),
+    }
+}
+
+fn snapshot_detail_handle(profile: &str, database_id: &str, snapshot_name: &str) -> Value {
+    json!({
+        "type": "schema-snapshot",
+        "profile": profile,
+        "databaseId": database_id,
+        "snapshotName": snapshot_name
+    })
+}
+
+fn template_detail_handle(profile: &str, template_name: &str) -> Value {
+    json!({
+        "type": "template",
+        "profile": profile,
+        "templateName": template_name
+    })
+}
+
+fn read_templates(profile: &str) -> anyhow::Result<Vec<TemplateMetadata>> {
+    let dir = pgsandbox_state_root()?
+        .join("templates")
+        .join(profile_artifact_component(profile));
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut templates = Vec::new();
+    for entry in fs::read_dir(&dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|value| value.to_str()) == Some("json") {
+            if let Some(metadata) = read_json_file::<TemplateMetadata>(&path)? {
+                templates.push(metadata);
+            }
+        }
+    }
+    templates.sort_by(|left, right| left.template_name.cmp(&right.template_name));
+    Ok(templates)
+}
+
+fn write_json_file<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    }
+    let raw = format!("{}\n", serde_json::to_string_pretty(value)?);
+    fs::write(path, raw).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> anyhow::Result<Option<T>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse JSON {}", path.display()))
+        .map(Some)
+}
+
+fn remove_file_if_exists(path: &Path) -> anyhow::Result<bool> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("failed to remove {}", path.display())),
+    }
+}
+
+async fn dump_database_to_file(database_url: &str, dump_path: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = dump_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create template directory {}", parent.display()))?;
+    }
+    let temp_path = dump_path.with_extension(format!("dump.tmp-{}", Uuid::new_v4().simple()));
+    let connection = pg_tool_connection_from_url(database_url)
+        .context("sandbox connection string is not a supported Postgres URL")?;
+    let output = Command::new("pg_dump")
+        .args(pg_dump_file_args(&connection.database, &temp_path, false))
+        .envs(connection.env.iter())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("failed to start pg_dump; install PostgreSQL client tools and ensure pg_dump is on PATH")?;
+    if !output.status.success() {
+        let _ = fs::remove_file(&temp_path);
+        anyhow::bail!("pg_dump failed: {}", summarize_tool_stderr(&output.stderr));
+    }
+    if dump_path.exists() {
+        fs::remove_file(dump_path)
+            .with_context(|| format!("failed to replace template dump {}", dump_path.display()))?;
+    }
+    fs::rename(&temp_path, dump_path).with_context(|| {
+        format!(
+            "failed to move template dump from {} to {}",
+            temp_path.display(),
+            dump_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+async fn restore_database_from_file(dump_path: &Path, database_url: &str) -> anyhow::Result<()> {
+    let connection = pg_tool_connection_from_url(database_url)
+        .context("target sandbox connection string is not a supported Postgres URL")?;
+    let output = Command::new("pg_restore")
+        .args(pg_restore_file_args(&connection.database, dump_path))
+        .envs(connection.env.iter())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("failed to start pg_restore; install PostgreSQL client tools and ensure pg_restore is on PATH")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "pg_restore failed: {}",
+            summarize_tool_stderr(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+fn pg_dump_file_args(database: &str, output_file: &Path, schema_only: bool) -> Vec<String> {
+    let mut args = pg_dump_args(database, schema_only);
+    args.extend(["--file".to_string(), output_file.display().to_string()]);
+    args
+}
+
+fn pg_restore_file_args(database: &str, dump_file: &Path) -> Vec<String> {
+    let mut args = pg_restore_args(database);
+    args.push(dump_file.display().to_string());
+    args
+}
+
+fn mask_connection_string(value: &str) -> String {
+    if let Ok(mut url) = Url::parse(value) {
+        if url.password().is_some() {
+            let _ = url.set_password(Some("****"));
+        }
+        return url.to_string();
+    }
+    value.to_string()
 }
 
 async fn connect_admin(
@@ -2976,6 +4988,181 @@ mod tests {
     }
 
     #[test]
+    fn template_file_args_do_not_include_connection_urls() {
+        let dump_path = PathBuf::from("/tmp/pgsandbox-template.dump");
+        let dump_args = pg_dump_file_args("source_db", &dump_path, false);
+        let restore_args = pg_restore_file_args("target_db", &dump_path);
+        let joined_args = dump_args
+            .iter()
+            .chain(restore_args.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(!joined_args.contains("postgres://"));
+        assert!(dump_args.contains(&"--file".to_string()));
+        assert!(dump_args.contains(&dump_path.display().to_string()));
+        assert!(restore_args.contains(&"--single-transaction".to_string()));
+        assert!(restore_args.contains(&dump_path.display().to_string()));
+    }
+
+    #[test]
+    fn validates_artifact_names_for_local_files() {
+        assert_eq!(
+            validate_artifact_name("django_seed.v1", "templateName").unwrap(),
+            "django_seed.v1"
+        );
+        assert!(validate_artifact_name("../prod", "templateName").is_err());
+        assert!(validate_artifact_name("nested/name", "templateName").is_err());
+        assert!(validate_artifact_name("", "templateName").is_err());
+    }
+
+    #[test]
+    fn detects_django_repo_and_writes_secret_free_project_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let repo = directory.path();
+        std::fs::write(
+            repo.join("manage.py"),
+            "import os\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'app.settings')\n",
+        )
+        .unwrap();
+
+        assert!(detect_django_repo(repo).unwrap());
+
+        let config = RepoProjectConfig {
+            framework: "django".to_string(),
+            migration_command: default_django_migration_command(),
+            seed_command: None,
+            database_url_env: "DATABASE_URL".to_string(),
+            prepared_at: Utc::now(),
+        };
+        let path = write_repo_project_config(repo, &config).unwrap();
+        let raw = std::fs::read_to_string(path).unwrap();
+
+        assert!(raw.contains("\"framework\": \"django\""));
+        assert!(raw.contains("\"manage.py\""));
+        assert!(!raw.contains("postgres://"));
+        assert!(!raw.contains("secret"));
+    }
+
+    #[test]
+    fn migration_commands_are_limited_to_django_migrate() {
+        let directory = tempfile::tempdir().unwrap();
+        let repo = directory.path();
+
+        assert!(resolve_migration_command(
+            repo,
+            Some(vec![
+                "python".to_string(),
+                "manage.py".to_string(),
+                "migrate".to_string(),
+                "--noinput".to_string(),
+            ]),
+        )
+        .unwrap()
+        .is_ok());
+
+        let shell = resolve_migration_command(
+            repo,
+            Some(vec![
+                "bash".to_string(),
+                "-lc".to_string(),
+                "python manage.py migrate".to_string(),
+            ]),
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(shell.code, "unsafe_migration_command");
+
+        let shell_management_command = resolve_migration_command(
+            repo,
+            Some(vec![
+                "python".to_string(),
+                "manage.py".to_string(),
+                "shell".to_string(),
+            ]),
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(shell_management_command.code, "unsafe_migration_command");
+
+        let fake_python = resolve_migration_command(
+            repo,
+            Some(vec![
+                "python-malicious".to_string(),
+                "manage.py".to_string(),
+                "migrate".to_string(),
+            ]),
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(fake_python.code, "unsafe_migration_command");
+
+        let alternate_database = resolve_migration_command(
+            repo,
+            Some(vec![
+                "python".to_string(),
+                "manage.py".to_string(),
+                "migrate".to_string(),
+                "--database=default".to_string(),
+            ]),
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(alternate_database.code, "unsafe_migration_command");
+    }
+
+    #[test]
+    fn seed_command_requires_explicit_input_or_project_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let repo = directory.path();
+        let missing = resolve_seed_command(repo, None).unwrap().unwrap_err();
+
+        assert_eq!(missing.code, "missing_seed_command");
+
+        let explicit = resolve_seed_command(
+            repo,
+            Some(vec![
+                "python".to_string(),
+                "manage.py".to_string(),
+                "loaddata".to_string(),
+                "fixture.json".to_string(),
+            ]),
+        )
+        .unwrap();
+        assert!(explicit.is_ok());
+    }
+
+    #[test]
+    fn command_env_injects_database_url_and_pg_vars() {
+        let env = database_command_env(
+            "postgres://sandbox:p%40ss@localhost:65432/app_db?sslmode=disable",
+        )
+        .unwrap();
+
+        assert_eq!(env.get("PGDATABASE").map(String::as_str), Some("app_db"));
+        assert_eq!(env.get("PGUSER").map(String::as_str), Some("sandbox"));
+        assert_eq!(env.get("PGPASSWORD").map(String::as_str), Some("p@ss"));
+        assert_eq!(
+            env.get("DATABASE_URL").map(String::as_str),
+            Some("postgres://sandbox:p%40ss@localhost:65432/app_db?sslmode=disable")
+        );
+    }
+
+    #[test]
+    fn schema_diff_counts_all_changes_but_bounds_output() {
+        let from = workflow_test_digest((0..80).map(|index| format!("public.t_{index}")).collect());
+        let to = workflow_test_digest((80..160).map(|index| format!("public.t_{index}")).collect());
+        let diff = diff_workflow_schema_digests(&from, &to);
+
+        assert_eq!(diff.changed_objects.added, 80);
+        assert_eq!(diff.changed_objects.removed, 80);
+        assert_eq!(diff.added.len(), MAX_SCHEMA_DIFF_ITEMS);
+        assert_eq!(diff.removed.len(), MAX_SCHEMA_DIFF_ITEMS);
+        assert!(diff.truncated);
+    }
+
+    #[test]
     fn summarizes_tool_stderr_without_splitting_utf8_characters() {
         let stderr = format!("{}éproblem", "a".repeat(3_999));
         let summary = summarize_tool_stderr(stderr.as_bytes());
@@ -3077,6 +5264,49 @@ mod tests {
             extension_count: 1,
             tables,
             extensions,
+        }
+    }
+
+    fn workflow_test_digest(table_names: Vec<String>) -> WorkflowSchemaDigest {
+        let tables = table_names
+            .into_iter()
+            .map(|name| {
+                schema_object_digest(
+                    "table",
+                    name.clone(),
+                    json!({
+                        "schema": "public",
+                        "name": name,
+                        "tableType": "BASE TABLE"
+                    }),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let object_counts = SchemaObjectCounts {
+            tables: tables.len(),
+            columns: 0,
+            indexes: 0,
+            extensions: 0,
+        };
+        let fingerprint = fingerprint_json(&json!({
+            "digestVersion": SCHEMA_DIGEST_VERSION,
+            "objectCounts": object_counts.clone(),
+            "tables": tables.clone(),
+            "columns": [],
+            "indexes": [],
+            "extensions": []
+        }))
+        .unwrap();
+
+        WorkflowSchemaDigest {
+            digest_version: SCHEMA_DIGEST_VERSION,
+            fingerprint,
+            object_counts,
+            tables,
+            columns: Vec::new(),
+            indexes: Vec::new(),
+            extensions: Vec::new(),
         }
     }
 }
