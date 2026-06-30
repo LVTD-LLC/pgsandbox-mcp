@@ -2,6 +2,7 @@ use std::{env, fs};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use url::Url;
 
 use crate::local::{LocalPostgresCluster, LOCAL_PROFILE_NAME};
 
@@ -27,6 +28,16 @@ pub enum ConfigError {
     EmptyAdminUrl,
     #[error("defaultTtlMinutes cannot exceed maxTtlMinutes for profile {0}")]
     InvalidTtl(String),
+    #[error("profile {profile} adminUrl is invalid: {source}")]
+    InvalidAdminUrl {
+        profile: String,
+        #[source]
+        source: url::ParseError,
+    },
+    #[error("profile {profile} adminUrl host {host} is not in allowedAdminHosts")]
+    AdminHostNotAllowed { profile: String, host: String },
+    #[error("profile {0} adminUrl points at a non-local host; set allowExternalAdminUrl true or list the host in allowedAdminHosts to opt in explicitly")]
+    ExternalAdminUrlRequiresOptIn(String),
     #[error("default profile does not exist: {0}")]
     MissingDefaultProfile(String),
     #[error("Unknown Postgres profile: {0}")]
@@ -55,6 +66,12 @@ pub struct SandboxProfile {
     pub default_ttl_minutes: u32,
     #[serde(default = "default_max_ttl_minutes")]
     pub max_ttl_minutes: u32,
+    #[serde(default)]
+    pub allow_external_admin_url: bool,
+    #[serde(default)]
+    pub allowed_admin_hosts: Vec<String>,
+    #[serde(default)]
+    pub max_active_databases_per_owner: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -156,6 +173,17 @@ where
                     .get("PGSANDBOX_MAX_TTL_MINUTES")
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(DEFAULT_MAX_TTL_MINUTES),
+                allow_external_admin_url: env
+                    .get("PGSANDBOX_ALLOW_EXTERNAL_ADMIN_URL")
+                    .and_then(|value| parse_bool_flag(value))
+                    .unwrap_or(false),
+                allowed_admin_hosts: env
+                    .get("PGSANDBOX_ALLOWED_ADMIN_HOSTS")
+                    .map(|value| parse_csv_list(value))
+                    .unwrap_or_default(),
+                max_active_databases_per_owner: env
+                    .get("PGSANDBOX_MAX_ACTIVE_DATABASES_PER_OWNER")
+                    .and_then(|value| value.parse().ok()),
             }],
             telemetry: TelemetryConfig::default(),
         })?
@@ -200,6 +228,7 @@ fn normalize_config(raw: RawConfig) -> Result<SandboxConfig, ConfigError> {
         if profile.default_ttl_minutes > profile.max_ttl_minutes {
             return Err(ConfigError::InvalidTtl(profile.name.clone()));
         }
+        validate_admin_url_policy(profile)?;
     }
 
     let default_profile = raw
@@ -220,6 +249,64 @@ fn normalize_config(raw: RawConfig) -> Result<SandboxConfig, ConfigError> {
         profiles: raw.profiles,
         telemetry: raw.telemetry,
     })
+}
+
+pub fn admin_url_host(admin_url: &str) -> Result<Option<String>, url::ParseError> {
+    Ok(Url::parse(admin_url)?
+        .host_str()
+        .map(|host| host.trim_matches(['[', ']']).to_ascii_lowercase()))
+}
+
+pub fn is_local_admin_url(admin_url: &str) -> Result<bool, url::ParseError> {
+    let Some(host) = admin_url_host(admin_url)? else {
+        return Ok(true);
+    };
+    Ok(matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1"))
+}
+
+fn validate_admin_url_policy(profile: &SandboxProfile) -> Result<(), ConfigError> {
+    let host =
+        admin_url_host(&profile.admin_url).map_err(|source| ConfigError::InvalidAdminUrl {
+            profile: profile.name.clone(),
+            source,
+        })?;
+    let normalized_allowed_hosts = profile
+        .allowed_admin_hosts
+        .iter()
+        .map(|host| host.trim_matches(['[', ']']).to_ascii_lowercase())
+        .collect::<Vec<_>>();
+
+    let is_local =
+        is_local_admin_url(&profile.admin_url).map_err(|source| ConfigError::InvalidAdminUrl {
+            profile: profile.name.clone(),
+            source,
+        })?;
+    if is_local {
+        return Ok(());
+    }
+
+    if !normalized_allowed_hosts.is_empty() {
+        let host_for_error = host.clone().unwrap_or_else(|| "(none)".to_string());
+        let host_allowed = host.as_deref().is_some_and(|host| {
+            normalized_allowed_hosts
+                .iter()
+                .any(|allowed| allowed == host)
+        });
+        if !host_allowed {
+            return Err(ConfigError::AdminHostNotAllowed {
+                profile: profile.name.clone(),
+                host: host_for_error,
+            });
+        }
+    }
+
+    if profile.allow_external_admin_url || !normalized_allowed_hosts.is_empty() {
+        return Ok(());
+    }
+
+    Err(ConfigError::ExternalAdminUrlRequiresOptIn(
+        profile.name.clone(),
+    ))
 }
 
 pub fn telemetry_config_from_env<I, K, V>(vars: I) -> TelemetryConfig
@@ -286,6 +373,15 @@ fn parse_bool_flag(value: &str) -> Option<bool> {
     }
 }
 
+fn parse_csv_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
 fn default_database_prefix() -> String {
     DEFAULT_DATABASE_PREFIX.to_string()
 }
@@ -317,6 +413,9 @@ mod tests {
         assert_eq!(config.default_profile, "default");
         assert_eq!(config.profiles[0].database_prefix, "pgsandbox");
         assert_eq!(config.profiles[0].default_ttl_minutes, 240);
+        assert!(!config.profiles[0].allow_external_admin_url);
+        assert!(config.profiles[0].allowed_admin_hosts.is_empty());
+        assert_eq!(config.profiles[0].max_active_databases_per_owner, None);
         assert!(config.telemetry.enabled);
     }
 
@@ -384,7 +483,8 @@ mod tests {
                   "adminUrl": "postgres://postgres:postgres@localhost:5432/postgres",
                   "databasePrefix": "agentdb",
                   "defaultTtlMinutes": 10,
-                  "maxTtlMinutes": 20
+                  "maxTtlMinutes": 20,
+                  "maxActiveDatabasesPerOwner": 2
                 }
               ]
             }"#,
@@ -393,7 +493,111 @@ mod tests {
 
         assert_eq!(config.default_profile, "local-pg17");
         assert_eq!(config.profiles[0].database_prefix, "agentdb");
+        assert_eq!(config.profiles[0].max_active_databases_per_owner, Some(2));
         assert!(config.telemetry.enabled);
+    }
+
+    #[test]
+    fn rejects_non_local_admin_url_without_explicit_opt_in() {
+        let err = parse_config_file(
+            r#"{
+              "defaultProfile": "remote",
+              "profiles": [{ "name": "remote", "adminUrl": "postgres://postgres:postgres@db.example.com/postgres" }]
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("non-local host"));
+    }
+
+    #[test]
+    fn allows_non_local_admin_url_with_explicit_opt_in() {
+        let config = parse_config_file(
+            r#"{
+              "defaultProfile": "remote",
+              "profiles": [{
+                "name": "remote",
+                "adminUrl": "postgres://postgres:postgres@db.example.com/postgres",
+                "allowExternalAdminUrl": true
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        assert!(config.profiles[0].allow_external_admin_url);
+    }
+
+    #[test]
+    fn allowed_admin_hosts_opt_in_and_restrict_hosts() {
+        let config = parse_config_file(
+            r#"{
+              "defaultProfile": "remote",
+              "profiles": [{
+                "name": "remote",
+                "adminUrl": "postgres://postgres:postgres@db.example.com/postgres",
+                "allowedAdminHosts": ["db.example.com"]
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.profiles[0].allowed_admin_hosts, ["db.example.com"]);
+
+        let err = parse_config_file(
+            r#"{
+              "defaultProfile": "remote",
+              "profiles": [{
+                "name": "remote",
+                "adminUrl": "postgres://postgres:postgres@other.example.com/postgres",
+                "allowedAdminHosts": ["db.example.com"]
+              }]
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("allowedAdminHosts"));
+    }
+
+    #[test]
+    fn allowed_admin_hosts_do_not_block_hostless_local_urls() {
+        let config = parse_config_file(
+            r#"{
+              "defaultProfile": "local-socket",
+              "profiles": [{
+                "name": "local-socket",
+                "adminUrl": "postgres:///postgres",
+                "allowedAdminHosts": ["db.example.com"]
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.profiles[0].admin_url, "postgres:///postgres");
+    }
+
+    #[test]
+    fn parses_policy_from_env() {
+        let config = load_config_from_env([
+            (
+                "PGSANDBOX_ADMIN_DATABASE_URL",
+                "postgres://postgres:postgres@db.example.com/postgres",
+            ),
+            ("PGSANDBOX_ALLOW_EXTERNAL_ADMIN_URL", "true"),
+            (
+                "PGSANDBOX_ALLOWED_ADMIN_HOSTS",
+                "db.example.com, standby.example.com",
+            ),
+            ("PGSANDBOX_MAX_ACTIVE_DATABASES_PER_OWNER", "3"),
+        ])
+        .unwrap();
+
+        let profile = &config.profiles[0];
+        assert!(profile.allow_external_admin_url);
+        assert_eq!(
+            profile.allowed_admin_hosts,
+            ["db.example.com", "standby.example.com"]
+        );
+        assert_eq!(profile.max_active_databases_per_owner, Some(3));
     }
 
     #[test]

@@ -10,7 +10,8 @@ use crate::{
     config::SandboxConfig,
     postgres::{
         CleanupExpiredInput, CloneDatabaseInput, CreateDatabaseInput, DatabaseSelector,
-        ListDatabasesInput, PostgresSandboxManager, RunSqlInput,
+        ExplainQueryInput, ListDatabasesInput, PostgresSandboxManager, RunSqlInput,
+        SchemaDiffInput,
     },
     telemetry::{properties, Telemetry, EVENT_MCP_SERVER_STARTED, EVENT_MCP_TOOL_COMPLETED},
 };
@@ -157,6 +158,59 @@ impl PgsandboxServer {
             "describe_schema",
             event_properties,
             self.manager.describe_schema(input),
+        )
+        .await
+    }
+
+    #[tool(description = "Return a compact checksummed schema digest for a sandbox database.")]
+    async fn schema_digest(
+        &self,
+        Parameters(input): Parameters<DatabaseSelector>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let event_properties = selector_properties(&input);
+        self.tracked_tool(
+            "schema_digest",
+            event_properties,
+            self.manager.schema_digest(input),
+        )
+        .await
+    }
+
+    #[tool(description = "Compare a base schema_digest response with the current sandbox schema.")]
+    async fn schema_diff(
+        &self,
+        Parameters(input): Parameters<SchemaDiffInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let event_properties = properties([
+            ("hasProfile", json!(input.profile.is_some())),
+            ("hasDatabaseId", json!(input.database_id.is_some())),
+            ("hasDatabaseName", json!(input.database_name.is_some())),
+            ("hasBaseDigest", json!(!input.base_digest.is_null())),
+        ]);
+        self.tracked_tool(
+            "schema_diff",
+            event_properties,
+            self.manager.schema_diff(input),
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Return a JSON EXPLAIN plan and compact summary for one sandbox SQL statement."
+    )]
+    async fn explain_query(
+        &self,
+        Parameters(input): Parameters<ExplainQueryInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let event_properties = properties([
+            ("hasProfile", json!(input.profile.is_some())),
+            ("hasDatabaseId", json!(input.database_id.is_some())),
+            ("hasDatabaseName", json!(input.database_name.is_some())),
+        ]);
+        self.tracked_tool(
+            "explain_query",
+            event_properties,
+            self.manager.explain_query(input),
         )
         .await
     }

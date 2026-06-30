@@ -3,7 +3,7 @@ use std::path::Path;
 use url::Url;
 
 use crate::{
-    config::{load_config_from_env, SandboxConfig},
+    config::{admin_url_host, is_local_admin_url, load_config_from_env, SandboxConfig},
     postgres::connect_url,
     setup::{detect_existing_client_configs, find_configured_admin_url},
 };
@@ -82,6 +82,22 @@ async fn check_profiles(config: &SandboxConfig, lines: &mut Vec<String>, ok: &mu
             profile.name,
             mask_connection_string(&profile.admin_url)
         ));
+        if matches!(is_local_admin_url(&profile.admin_url), Ok(false)) {
+            lines.push(format!(
+                "Profile {} policy: external admin URL explicitly enabled for host {}",
+                profile.name,
+                admin_url_host(&profile.admin_url)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "(unknown)".to_string())
+            ));
+        }
+        if let Some(limit) = profile.max_active_databases_per_owner {
+            lines.push(format!(
+                "Profile {} policy: maxActiveDatabasesPerOwner={limit}",
+                profile.name
+            ));
+        }
         let result = check_postgres(&profile.admin_url).await;
         *ok = *ok && result.0;
         lines.push(format!(

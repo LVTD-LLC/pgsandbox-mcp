@@ -41,6 +41,9 @@ Explicit single-profile setup comes from environment variables:
 - `PGSANDBOX_DATABASE_PREFIX`
 - `PGSANDBOX_DEFAULT_TTL_MINUTES`
 - `PGSANDBOX_MAX_TTL_MINUTES`
+- `PGSANDBOX_ALLOW_EXTERNAL_ADMIN_URL`
+- `PGSANDBOX_ALLOWED_ADMIN_HOSTS`
+- `PGSANDBOX_MAX_ACTIVE_DATABASES_PER_OWNER`
 - `PGSANDBOX_TELEMETRY`
 - `PGSANDBOX_NO_TELEMETRY`
 - `PGSANDBOX_DISABLE_TELEMETRY`
@@ -91,6 +94,8 @@ JSON config files may also set `"telemetry": { "enabled": false }`.
 - Readonly SQL must stay protected against transaction/session escape hatches.
 - The managed local runtime depends on `initdb`, `pg_ctl`, and `postgres`, but
   it must not depend on Docker.
+- Non-local admin URLs must remain explicit opt-ins through profile config or
+  env policy.
 - `clone_database` may depend on `pg_dump` and `pg_restore`; ordinary sandbox
   create/query/delete must not require those dump/restore tools.
 

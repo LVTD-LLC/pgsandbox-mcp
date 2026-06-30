@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, process::Stdio, sync::LazyLock};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    process::Stdio,
+    sync::LazyLock,
+};
 
 use aes_gcm::{
     aead::{Aead, AeadCore, OsRng},
@@ -27,6 +31,7 @@ use crate::{
 };
 
 const METADATA_TABLE: &str = "pgsandbox_databases";
+const AUDIT_TABLE: &str = "pgsandbox_events";
 const DEFAULT_ROW_LIMIT: usize = 100;
 const LIST_DATABASES_LIMIT: usize = 100;
 const ENCRYPTED_PASSWORD_PREFIX: &str = "v1";
@@ -99,6 +104,24 @@ pub struct ListDatabasesInput {
 pub struct CleanupExpiredInput {
     pub profile: Option<String>,
     pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaDiffInput {
+    pub profile: Option<String>,
+    pub database_id: Option<String>,
+    pub database_name: Option<String>,
+    pub base_digest: Value,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainQueryInput {
+    pub profile: Option<String>,
+    pub database_id: Option<String>,
+    pub database_name: Option<String>,
+    pub sql: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -178,6 +201,97 @@ pub struct CleanupExpiredOutput {
     pub selected: Option<Vec<Value>>,
     pub deleted: Option<Vec<String>>,
     pub failures: Option<Vec<Value>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaDigestOutput {
+    pub database_id: String,
+    pub database_name: String,
+    pub digest_version: u32,
+    pub checksum: String,
+    pub table_count: usize,
+    pub column_count: usize,
+    pub index_count: usize,
+    pub extension_count: usize,
+    pub tables: Vec<SchemaDigestTable>,
+    pub extensions: Vec<SchemaDigestExtension>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaDigestTable {
+    pub schema: String,
+    pub name: String,
+    pub columns: Vec<SchemaDigestColumn>,
+    pub indexes: Vec<SchemaDigestIndex>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaDigestColumn {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaDigestIndex {
+    pub name: String,
+    pub definition_hash: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaDigestExtension {
+    pub name: String,
+    pub version: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaDiffOutput {
+    pub database_id: String,
+    pub database_name: String,
+    pub before_checksum: String,
+    pub after_checksum: String,
+    pub changed: bool,
+    pub added_tables: Vec<String>,
+    pub removed_tables: Vec<String>,
+    pub changed_tables: Vec<SchemaTableDiff>,
+    pub added_extensions: Vec<String>,
+    pub removed_extensions: Vec<String>,
+    pub changed_extensions: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaTableDiff {
+    pub table: String,
+    pub added_columns: Vec<String>,
+    pub removed_columns: Vec<String>,
+    pub changed_columns: Vec<String>,
+    pub added_indexes: Vec<String>,
+    pub removed_indexes: Vec<String>,
+    pub changed_indexes: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainQueryOutput {
+    pub database_id: String,
+    pub database_name: String,
+    pub summary: Value,
+    pub plan: Value,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SchemaDigestContent<'a> {
+    digest_version: u32,
+    tables: &'a [SchemaDigestTable],
+    extensions: &'a [SchemaDigestExtension],
 }
 
 #[derive(Debug)]
@@ -263,6 +377,7 @@ impl PostgresSandboxManager {
 
         let (client, connection_task) = connect_admin(&profile).await?;
         ensure_metadata_table(&client).await?;
+        enforce_owner_quota(&client, &profile, input.owner.as_deref()).await?;
 
         let mut created_role = false;
         let mut created_database = false;
@@ -310,6 +425,20 @@ impl PostgresSandboxManager {
                     ],
                 )
                 .await?;
+            let _ = record_audit_event(
+                &client,
+                "create_database",
+                &profile.name,
+                &names.database_id,
+                &names.database_name,
+                Some(&names.role_name),
+                json!({
+                    "owner": input.owner,
+                    "purpose": input.name_hint,
+                    "expiresAt": expires_at,
+                }),
+            )
+            .await;
             anyhow::Ok(())
         }
         .await;
@@ -332,6 +461,25 @@ impl PostgresSandboxManager {
                     ))
                     .await;
             }
+            let _ = client
+                .execute(
+                    &format!(
+                        "UPDATE {} SET deleted_at = now() WHERE database_id = $1",
+                        quote_ident(METADATA_TABLE)?
+                    ),
+                    &[&names.database_id],
+                )
+                .await;
+            let _ = record_audit_event(
+                &client,
+                "create_database_rolled_back",
+                &profile.name,
+                &names.database_id,
+                &names.database_name,
+                Some(&names.role_name),
+                json!({ "message": error.to_string() }),
+            )
+            .await;
             drop(client);
             let _ = connection_task.await;
             return Err(error);
@@ -450,6 +598,16 @@ impl PostgresSandboxManager {
                 &[&record.database_id],
             )
             .await?;
+        let _ = record_audit_event(
+            &client,
+            "delete_database",
+            &profile.name,
+            &record.database_id,
+            &record.database_name,
+            Some(&record.role_name),
+            json!({ "deleted": true }),
+        )
+        .await;
 
         drop(client);
         let _ = connection_task.await;
@@ -619,6 +777,76 @@ impl PostgresSandboxManager {
         })
     }
 
+    pub async fn schema_digest(
+        &self,
+        input: DatabaseSelector,
+    ) -> anyhow::Result<SchemaDigestOutput> {
+        let connection = self.get_connection_string(input).await?;
+        let (client, connection_task) = connect_url(&connection.connection_string).await?;
+
+        let digest = schema_digest_for_connection(
+            &client,
+            connection.database_id.clone(),
+            connection.database_name.clone(),
+        )
+        .await;
+
+        drop(client);
+        let _ = connection_task.await;
+
+        digest
+    }
+
+    pub async fn schema_diff(&self, input: SchemaDiffInput) -> anyhow::Result<SchemaDiffOutput> {
+        let before = serde_json::from_value::<SchemaDigestOutput>(input.base_digest)
+            .context("baseDigest must be a schema_digest response")?;
+        let after = self
+            .schema_digest(DatabaseSelector {
+                profile: input.profile,
+                database_id: input.database_id,
+                database_name: input.database_name,
+            })
+            .await?;
+
+        diff_schema_digests(&before, &after)
+    }
+
+    pub async fn explain_query(
+        &self,
+        input: ExplainQueryInput,
+    ) -> anyhow::Result<ExplainQueryOutput> {
+        let connection = self
+            .get_connection_string(DatabaseSelector {
+                profile: input.profile,
+                database_id: input.database_id,
+                database_name: input.database_name,
+            })
+            .await?;
+        let statement = explainable_statement(&input.sql)?;
+        let explain_sql = format!("EXPLAIN (FORMAT JSON) {statement}");
+        let (client, connection_task) = connect_url(&connection.connection_string).await?;
+
+        let result = async {
+            let row = client.query_one(&explain_sql, &[]).await?;
+            let plan = row
+                .try_get::<_, Value>(0)
+                .context("Postgres did not return JSON explain output")?;
+            let summary = explain_summary(&plan);
+            anyhow::Ok(ExplainQueryOutput {
+                database_id: connection.database_id,
+                database_name: connection.database_name,
+                summary,
+                plan,
+            })
+        }
+        .await;
+
+        drop(client);
+        let _ = connection_task.await;
+
+        result
+    }
+
     pub async fn cleanup_expired(
         &self,
         input: CleanupExpiredInput,
@@ -690,11 +918,36 @@ impl PostgresSandboxManager {
             .await;
 
             match deletion {
-                Ok(()) => deleted.push(record.database_id),
-                Err(error) => failures.push(json!({
-                    "databaseId": record.database_id,
-                    "message": error.to_string()
-                })),
+                Ok(()) => {
+                    deleted.push(record.database_id.clone());
+                    let _ = record_audit_event(
+                        &client,
+                        "cleanup_expired",
+                        &profile.name,
+                        &record.database_id,
+                        &record.database_name,
+                        Some(&record.role_name),
+                        json!({ "expiresAt": record.expires_at }),
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    let _ = record_audit_event(
+                        &client,
+                        "cleanup_expired_failed",
+                        &profile.name,
+                        &record.database_id,
+                        &record.database_name,
+                        Some(&record.role_name),
+                        json!({ "message": message.clone() }),
+                    )
+                    .await;
+                    failures.push(json!({
+                        "databaseId": record.database_id,
+                        "message": message
+                    }));
+                }
             }
         }
 
@@ -840,7 +1093,97 @@ async fn ensure_metadata_table(client: &Client) -> anyhow::Result<()> {
             quote_ident(METADATA_TABLE)?
         ))
         .await?;
+    client
+        .batch_execute(&format!(
+            r#"
+              CREATE TABLE IF NOT EXISTS {} (
+                event_id text PRIMARY KEY,
+                profile_name text NOT NULL,
+                database_id text NOT NULL,
+                database_name text NOT NULL,
+                role_name text,
+                event_type text NOT NULL,
+                details jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+                created_at timestamptz NOT NULL DEFAULT now()
+              )
+            "#,
+            quote_ident(AUDIT_TABLE)?
+        ))
+        .await?;
     Ok(())
+}
+
+async fn record_audit_event(
+    client: &Client,
+    event_type: &str,
+    profile_name: &str,
+    database_id: &str,
+    database_name: &str,
+    role_name: Option<&str>,
+    details: Value,
+) -> anyhow::Result<()> {
+    client
+        .execute(
+            &format!(
+                r#"
+                  INSERT INTO {}
+                    (event_id, profile_name, database_id, database_name, role_name, event_type, details)
+                  VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                "#,
+                quote_ident(AUDIT_TABLE)?
+            ),
+            &[
+                &Uuid::new_v4().to_string() as &(dyn ToSql + Sync),
+                &profile_name,
+                &database_id,
+                &database_name,
+                &role_name,
+                &event_type,
+                &details,
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn enforce_owner_quota(
+    client: &Client,
+    profile: &SandboxProfile,
+    owner: Option<&str>,
+) -> anyhow::Result<()> {
+    let Some(limit) = profile.max_active_databases_per_owner else {
+        return Ok(());
+    };
+    let Some(owner) = owner.filter(|owner| !owner.trim().is_empty()) else {
+        return Ok(());
+    };
+
+    let row = client
+        .query_one(&active_owner_quota_sql()?, &[&profile.name, &owner])
+        .await?;
+    let active_count = row.get::<_, i64>("active_count");
+    if active_count >= i64::from(limit) {
+        anyhow::bail!(
+            "owner {owner} already has {active_count} active sandbox database(s), which meets maxActiveDatabasesPerOwner ({limit}) for profile {}",
+            profile.name
+        );
+    }
+
+    Ok(())
+}
+
+fn active_owner_quota_sql() -> anyhow::Result<String> {
+    Ok(format!(
+        r#"
+          SELECT count(*)::bigint AS active_count
+          FROM {}
+          WHERE profile_name = $1
+            AND owner = $2
+            AND deleted_at IS NULL
+            AND expires_at > now()
+        "#,
+        quote_ident(METADATA_TABLE)?
+    ))
 }
 
 async fn find_record(
@@ -889,6 +1232,333 @@ async fn terminate_database_connections(
         )
         .await?;
     Ok(())
+}
+
+async fn schema_digest_for_connection(
+    client: &Client,
+    database_id: String,
+    database_name: String,
+) -> anyhow::Result<SchemaDigestOutput> {
+    let table_rows = client
+        .query(
+            r#"
+              SELECT n.nspname AS table_schema, c.relname AS table_name
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE c.relkind IN ('r', 'p')
+                AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+              ORDER BY n.nspname, c.relname
+            "#,
+            &[],
+        )
+        .await?;
+    let column_rows = client
+        .query(
+            r#"
+              SELECT n.nspname AS table_schema,
+                     c.relname AS table_name,
+                     a.attname AS column_name,
+                     pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+                     NOT a.attnotnull AS nullable
+              FROM pg_attribute a
+              JOIN pg_class c ON c.oid = a.attrelid
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE c.relkind IN ('r', 'p')
+                AND a.attnum > 0
+                AND NOT a.attisdropped
+                AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+              ORDER BY n.nspname, c.relname, a.attnum
+            "#,
+            &[],
+        )
+        .await?;
+    let index_rows = client
+        .query(
+            r#"
+              SELECT schemaname, tablename, indexname, indexdef
+              FROM pg_indexes
+              WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+              ORDER BY schemaname, tablename, indexname
+            "#,
+            &[],
+        )
+        .await?;
+    let extension_rows = client
+        .query(
+            "SELECT extname, extversion FROM pg_extension ORDER BY extname",
+            &[],
+        )
+        .await?;
+
+    let mut tables = BTreeMap::<(String, String), SchemaDigestTable>::new();
+    for row in table_rows {
+        let schema = row.get::<_, String>("table_schema");
+        let name = row.get::<_, String>("table_name");
+        tables.insert(
+            (schema.clone(), name.clone()),
+            SchemaDigestTable {
+                schema,
+                name,
+                columns: Vec::new(),
+                indexes: Vec::new(),
+            },
+        );
+    }
+
+    for row in column_rows {
+        let schema = row.get::<_, String>("table_schema");
+        let name = row.get::<_, String>("table_name");
+        let table = tables
+            .entry((schema.clone(), name.clone()))
+            .or_insert_with(|| SchemaDigestTable {
+                schema,
+                name,
+                columns: Vec::new(),
+                indexes: Vec::new(),
+            });
+        table.columns.push(SchemaDigestColumn {
+            name: row.get("column_name"),
+            data_type: row.get("data_type"),
+            nullable: row.get("nullable"),
+        });
+    }
+
+    for row in index_rows {
+        let schema = row.get::<_, String>("schemaname");
+        let name = row.get::<_, String>("tablename");
+        let indexdef = row.get::<_, String>("indexdef");
+        if let Some(table) = tables.get_mut(&(schema, name)) {
+            table.indexes.push(SchemaDigestIndex {
+                name: row.get("indexname"),
+                definition_hash: sha256_hex(indexdef.as_bytes()),
+            });
+        }
+    }
+
+    let tables = tables.into_values().collect::<Vec<_>>();
+    let extensions = extension_rows
+        .into_iter()
+        .map(|row| SchemaDigestExtension {
+            name: row.get("extname"),
+            version: row.get("extversion"),
+        })
+        .collect::<Vec<_>>();
+
+    let table_count = tables.len();
+    let column_count = tables.iter().map(|table| table.columns.len()).sum();
+    let index_count = tables.iter().map(|table| table.indexes.len()).sum();
+    let extension_count = extensions.len();
+    let checksum = schema_digest_checksum(&tables, &extensions)?;
+
+    Ok(SchemaDigestOutput {
+        database_id,
+        database_name,
+        digest_version: 1,
+        checksum,
+        table_count,
+        column_count,
+        index_count,
+        extension_count,
+        tables,
+        extensions,
+    })
+}
+
+fn schema_digest_checksum(
+    tables: &[SchemaDigestTable],
+    extensions: &[SchemaDigestExtension],
+) -> anyhow::Result<String> {
+    let content = SchemaDigestContent {
+        digest_version: 1,
+        tables,
+        extensions,
+    };
+    Ok(sha256_hex(&serde_json::to_vec(&content)?))
+}
+
+fn diff_schema_digests(
+    before: &SchemaDigestOutput,
+    after: &SchemaDigestOutput,
+) -> anyhow::Result<SchemaDiffOutput> {
+    if before.digest_version != after.digest_version {
+        anyhow::bail!(
+            "schema digest versions differ: baseDigest uses v{} but current digest uses v{}",
+            before.digest_version,
+            after.digest_version
+        );
+    }
+
+    let before_tables = before
+        .tables
+        .iter()
+        .map(|table| (schema_table_key(table), table))
+        .collect::<BTreeMap<_, _>>();
+    let after_tables = after
+        .tables
+        .iter()
+        .map(|table| (schema_table_key(table), table))
+        .collect::<BTreeMap<_, _>>();
+
+    let added_tables = after_tables
+        .keys()
+        .filter(|key| !before_tables.contains_key(*key))
+        .cloned()
+        .collect::<Vec<_>>();
+    let removed_tables = before_tables
+        .keys()
+        .filter(|key| !after_tables.contains_key(*key))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut changed_tables = Vec::new();
+
+    for (key, before_table) in &before_tables {
+        let Some(after_table) = after_tables.get(key) else {
+            continue;
+        };
+        let diff = diff_schema_table(key, before_table, after_table);
+        if diff.has_changes() {
+            changed_tables.push(diff);
+        }
+    }
+
+    let before_extensions = before
+        .extensions
+        .iter()
+        .map(|extension| (extension.name.clone(), extension.version.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let after_extensions = after
+        .extensions
+        .iter()
+        .map(|extension| (extension.name.clone(), extension.version.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let added_extensions = after_extensions
+        .keys()
+        .filter(|key| !before_extensions.contains_key(*key))
+        .cloned()
+        .collect::<Vec<_>>();
+    let removed_extensions = before_extensions
+        .keys()
+        .filter(|key| !after_extensions.contains_key(*key))
+        .cloned()
+        .collect::<Vec<_>>();
+    let changed_extensions = before_extensions
+        .iter()
+        .filter_map(|(name, before_version)| {
+            after_extensions
+                .get(name)
+                .filter(|after_version| *after_version != before_version)
+                .map(|_| name.clone())
+        })
+        .collect::<Vec<_>>();
+
+    let changed = before.checksum != after.checksum
+        || !added_tables.is_empty()
+        || !removed_tables.is_empty()
+        || !changed_tables.is_empty()
+        || !added_extensions.is_empty()
+        || !removed_extensions.is_empty()
+        || !changed_extensions.is_empty();
+    Ok(SchemaDiffOutput {
+        database_id: after.database_id.clone(),
+        database_name: after.database_name.clone(),
+        before_checksum: before.checksum.clone(),
+        after_checksum: after.checksum.clone(),
+        changed,
+        added_tables,
+        removed_tables,
+        changed_tables,
+        added_extensions,
+        removed_extensions,
+        changed_extensions,
+    })
+}
+
+impl SchemaTableDiff {
+    fn has_changes(&self) -> bool {
+        !self.added_columns.is_empty()
+            || !self.removed_columns.is_empty()
+            || !self.changed_columns.is_empty()
+            || !self.added_indexes.is_empty()
+            || !self.removed_indexes.is_empty()
+            || !self.changed_indexes.is_empty()
+    }
+}
+
+fn diff_schema_table(
+    table_key: &str,
+    before: &SchemaDigestTable,
+    after: &SchemaDigestTable,
+) -> SchemaTableDiff {
+    let before_columns = before
+        .columns
+        .iter()
+        .map(|column| (column.name.clone(), column))
+        .collect::<BTreeMap<_, _>>();
+    let after_columns = after
+        .columns
+        .iter()
+        .map(|column| (column.name.clone(), column))
+        .collect::<BTreeMap<_, _>>();
+    let before_indexes = before
+        .indexes
+        .iter()
+        .map(|index| (index.name.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    let after_indexes = after
+        .indexes
+        .iter()
+        .map(|index| (index.name.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+
+    SchemaTableDiff {
+        table: table_key.to_string(),
+        added_columns: keys_added(&before_columns, &after_columns),
+        removed_columns: keys_removed(&before_columns, &after_columns),
+        changed_columns: before_columns
+            .iter()
+            .filter_map(|(name, before_column)| {
+                after_columns
+                    .get(name)
+                    .filter(|after_column| *after_column != before_column)
+                    .map(|_| name.clone())
+            })
+            .collect(),
+        added_indexes: keys_added(&before_indexes, &after_indexes),
+        removed_indexes: keys_removed(&before_indexes, &after_indexes),
+        changed_indexes: before_indexes
+            .iter()
+            .filter_map(|(name, before_index)| {
+                after_indexes
+                    .get(name)
+                    .filter(|after_index| *after_index != before_index)
+                    .map(|_| name.clone())
+            })
+            .collect(),
+    }
+}
+
+fn keys_added<T>(before: &BTreeMap<String, T>, after: &BTreeMap<String, T>) -> Vec<String> {
+    after
+        .keys()
+        .filter(|key| !before.contains_key(*key))
+        .cloned()
+        .collect()
+}
+
+fn keys_removed<T>(before: &BTreeMap<String, T>, after: &BTreeMap<String, T>) -> Vec<String> {
+    before
+        .keys()
+        .filter(|key| !after.contains_key(*key))
+        .cloned()
+        .collect()
+}
+
+fn schema_table_key(table: &SchemaDigestTable) -> String {
+    format!("{}.{}", table.schema, table.name)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    bytes_to_hex(&Sha256::digest(bytes))
 }
 
 fn build_connection_string(
@@ -1160,6 +1830,96 @@ pub fn assert_safe_readonly_sql(sql: &str) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn explainable_statement(sql: &str) -> anyhow::Result<&str> {
+    assert_safe_readonly_sql(sql)?;
+    let statement = single_sql_statement(sql)?;
+    let keyword = first_sql_keyword(statement).context("explainQuery sql cannot be empty")?;
+    if !matches!(
+        keyword.as_str(),
+        "select" | "with" | "values" | "table" | "insert" | "update" | "delete" | "merge"
+    ) {
+        anyhow::bail!(
+            "explainQuery only accepts SELECT, WITH, VALUES, TABLE, INSERT, UPDATE, DELETE, or MERGE statements."
+        );
+    }
+    Ok(statement)
+}
+
+fn single_sql_statement(sql: &str) -> anyhow::Result<&str> {
+    let bytes = sql.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if skip_sql_noise(bytes, &mut index) {
+            continue;
+        }
+        if bytes[index] == b';' {
+            let statement = sql[..index].trim();
+            index += 1;
+            while index < bytes.len() {
+                if skip_sql_noise(bytes, &mut index) {
+                    continue;
+                }
+                anyhow::bail!("explainQuery only accepts a single SQL statement.");
+            }
+            if statement.is_empty() {
+                anyhow::bail!("explainQuery sql cannot be empty");
+            }
+            return Ok(statement);
+        }
+        index += 1;
+    }
+
+    let statement = sql.trim();
+    if statement.is_empty() {
+        anyhow::bail!("explainQuery sql cannot be empty");
+    }
+    Ok(statement)
+}
+
+fn explain_summary(plan: &Value) -> Value {
+    let root_plan = plan
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("Plan"));
+    let Some(root_plan) = root_plan else {
+        return json!({ "nodeCount": 0 });
+    };
+
+    let mut node_types = BTreeSet::new();
+    let mut relations = BTreeSet::new();
+    let mut node_count = 0usize;
+    collect_explain_summary(root_plan, &mut node_types, &mut relations, &mut node_count);
+
+    json!({
+        "topNode": root_plan.get("Node Type").and_then(Value::as_str),
+        "totalCost": root_plan.get("Total Cost").and_then(Value::as_f64),
+        "planRows": root_plan.get("Plan Rows").and_then(Value::as_i64),
+        "nodeCount": node_count,
+        "nodeTypes": node_types.into_iter().collect::<Vec<_>>(),
+        "relations": relations.into_iter().collect::<Vec<_>>()
+    })
+}
+
+fn collect_explain_summary(
+    plan: &Value,
+    node_types: &mut BTreeSet<String>,
+    relations: &mut BTreeSet<String>,
+    node_count: &mut usize,
+) {
+    *node_count += 1;
+    if let Some(node_type) = plan.get("Node Type").and_then(Value::as_str) {
+        node_types.insert(node_type.to_string());
+    }
+    if let Some(relation) = plan.get("Relation Name").and_then(Value::as_str) {
+        relations.insert(relation.to_string());
+    }
+    if let Some(plans) = plan.get("Plans").and_then(Value::as_array) {
+        for child in plans {
+            collect_explain_summary(child, node_types, relations, node_count);
+        }
+    }
 }
 
 async fn run_readonly_query(
@@ -1891,6 +2651,127 @@ mod tests {
     }
 
     #[test]
+    fn explain_validation_accepts_one_query_statement() {
+        assert_eq!(
+            explainable_statement("select * from users; -- ok").unwrap(),
+            "select * from users"
+        );
+        assert_eq!(
+            explainable_statement("update users set name = 'a' where id = 1 returning id").unwrap(),
+            "update users set name = 'a' where id = 1 returning id"
+        );
+        assert!(explainable_statement("select 1; select 2").is_err());
+        assert!(explainable_statement("create table users(id int)").is_err());
+        assert!(explainable_statement("set local statement_timeout = 1; select 1").is_err());
+    }
+
+    #[test]
+    fn schema_digest_checksum_ignores_database_identity() {
+        let tables = vec![SchemaDigestTable {
+            schema: "public".to_string(),
+            name: "users".to_string(),
+            columns: vec![SchemaDigestColumn {
+                name: "id".to_string(),
+                data_type: "integer".to_string(),
+                nullable: false,
+            }],
+            indexes: vec![SchemaDigestIndex {
+                name: "users_pkey".to_string(),
+                definition_hash: "abc123".to_string(),
+            }],
+        }];
+        let extensions = vec![SchemaDigestExtension {
+            name: "plpgsql".to_string(),
+            version: "1.0".to_string(),
+        }];
+
+        let first = SchemaDigestOutput {
+            database_id: "db_a".to_string(),
+            database_name: "sandbox_a".to_string(),
+            digest_version: 1,
+            checksum: schema_digest_checksum(&tables, &extensions).unwrap(),
+            table_count: 1,
+            column_count: 1,
+            index_count: 1,
+            extension_count: 1,
+            tables: tables.clone(),
+            extensions: extensions.clone(),
+        };
+        let second = SchemaDigestOutput {
+            database_id: "db_b".to_string(),
+            database_name: "sandbox_b".to_string(),
+            digest_version: 1,
+            checksum: schema_digest_checksum(&tables, &extensions).unwrap(),
+            table_count: 1,
+            column_count: 1,
+            index_count: 1,
+            extension_count: 1,
+            tables,
+            extensions,
+        };
+
+        assert_eq!(first.checksum, second.checksum);
+    }
+
+    #[test]
+    fn schema_diff_reports_table_column_index_and_extension_changes() {
+        let mut before = test_digest("before");
+        let mut after = test_digest("after");
+        after.tables[0].columns.push(SchemaDigestColumn {
+            name: "email".to_string(),
+            data_type: "text".to_string(),
+            nullable: false,
+        });
+        after.tables[0].indexes[0].definition_hash = "changed".to_string();
+        after.tables.push(SchemaDigestTable {
+            schema: "public".to_string(),
+            name: "posts".to_string(),
+            columns: vec![SchemaDigestColumn {
+                name: "id".to_string(),
+                data_type: "integer".to_string(),
+                nullable: false,
+            }],
+            indexes: Vec::new(),
+        });
+        after.extensions[0].version = "2.0".to_string();
+        after.checksum = "after-checksum".to_string();
+
+        let diff = diff_schema_digests(&before, &after).unwrap();
+
+        assert!(diff.changed);
+        assert_eq!(diff.added_tables, ["public.posts"]);
+        assert_eq!(diff.changed_extensions, ["plpgsql"]);
+        assert_eq!(diff.changed_tables.len(), 1);
+        assert_eq!(diff.changed_tables[0].table, "public.users");
+        assert_eq!(diff.changed_tables[0].added_columns, ["email"]);
+        assert_eq!(diff.changed_tables[0].changed_indexes, ["users_pkey"]);
+
+        before.checksum = after.checksum.clone();
+        let unchanged = diff_schema_digests(&before, &before).unwrap();
+        assert!(!unchanged.changed);
+        assert!(unchanged.changed_tables.is_empty());
+    }
+
+    #[test]
+    fn schema_diff_rejects_mismatched_digest_versions() {
+        let before = test_digest("before");
+        let mut after = test_digest("after");
+        after.digest_version = 2;
+
+        let error = diff_schema_digests(&before, &after).unwrap_err();
+
+        assert!(error.to_string().contains("schema digest versions differ"));
+    }
+
+    #[test]
+    fn owner_quota_counts_only_unexpired_active_databases() {
+        let sql = active_owner_quota_sql().unwrap();
+
+        assert!(sql.contains("deleted_at IS NULL"));
+        assert!(sql.contains("expires_at > now()"));
+    }
+
+    #[test]
     fn query_mode_detects_row_producing_sql() {
         assert!(matches!(query_mode("select 1"), QueryMode::Cursor));
         assert!(matches!(query_mode("table users"), QueryMode::Cursor));
@@ -1986,6 +2867,9 @@ mod tests {
             database_prefix: "pgsandbox".to_string(),
             default_ttl_minutes: 15,
             max_ttl_minutes: 60,
+            allow_external_admin_url: false,
+            allowed_admin_hosts: Vec::new(),
+            max_active_databases_per_owner: None,
         };
         let stored = protect_role_password("sandbox-secret", &profile).unwrap();
 
@@ -2162,5 +3046,37 @@ mod tests {
         raw.extend_from_slice(&micros.to_be_bytes());
         raw.extend_from_slice(&timezone_seconds_west.to_be_bytes());
         raw
+    }
+
+    fn test_digest(database_id: &str) -> SchemaDigestOutput {
+        let tables = vec![SchemaDigestTable {
+            schema: "public".to_string(),
+            name: "users".to_string(),
+            columns: vec![SchemaDigestColumn {
+                name: "id".to_string(),
+                data_type: "integer".to_string(),
+                nullable: false,
+            }],
+            indexes: vec![SchemaDigestIndex {
+                name: "users_pkey".to_string(),
+                definition_hash: "original".to_string(),
+            }],
+        }];
+        let extensions = vec![SchemaDigestExtension {
+            name: "plpgsql".to_string(),
+            version: "1.0".to_string(),
+        }];
+        SchemaDigestOutput {
+            database_id: database_id.to_string(),
+            database_name: format!("sandbox_{database_id}"),
+            digest_version: 1,
+            checksum: "before-checksum".to_string(),
+            table_count: 1,
+            column_count: 1,
+            index_count: 1,
+            extension_count: 1,
+            tables,
+            extensions,
+        }
     }
 }

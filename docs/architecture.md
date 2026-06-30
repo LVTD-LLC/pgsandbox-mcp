@@ -41,6 +41,10 @@ The MCP server owns all database lifecycle metadata in an internal table:
 - expiry timestamp
 - deleted timestamp
 
+Lifecycle events are also recorded in an internal audit table with event type,
+database id/name, profile, role name, timestamp, and small JSON details. The
+audit table does not store admin URLs or sandbox connection strings.
+
 ## Resource Model
 
 Each experiment gets:
@@ -93,7 +97,10 @@ socket access by Postgres tools.
 ## Profiles
 
 Profiles are the opt-in mechanism for supporting external Postgres versions or
-hosts instead of the managed local default.
+hosts instead of the managed local default. Local loopback profiles are allowed
+by default. A non-local admin URL requires an explicit opt-in through
+`allowExternalAdminUrl` or an `allowedAdminHosts` entry, and profiles can cap
+active databases per owner.
 
 Example:
 
@@ -103,7 +110,8 @@ Example:
   "profiles": [
     {
       "name": "external-pg17",
-      "adminUrl": "postgres://postgres:postgres@localhost:6543/postgres"
+      "adminUrl": "postgres://postgres:postgres@localhost:6543/postgres",
+      "maxActiveDatabasesPerOwner": 3
     },
     {
       "name": "external-pg16",
