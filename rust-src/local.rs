@@ -1,9 +1,12 @@
 use std::{
+    collections::BTreeSet,
+    ffi::OsString,
     fs,
     io::ErrorKind,
     net::TcpListener,
     path::{Path, PathBuf},
-    process::{Command, ExitStatus},
+    process::{Command, ExitStatus, Output, Stdio},
+    sync::OnceLock,
 };
 
 use anyhow::Context;
@@ -21,8 +24,16 @@ const PASSWORD_FILE: &str = "postgres/initdb-password";
 const SOCKET_DIR: &str = "postgres/run";
 const DEFAULT_LOCAL_PORT: u16 = 65432;
 const REQUIRED_LOCAL_BINARIES: &[&str] = &["initdb", "pg_ctl", "postgres"];
+const HOMEBREW_OPT_ROOTS: &[&str] = &["/opt/homebrew/opt", "/usr/local/opt"];
+const COMMON_LOCAL_POSTGRES_BIN_DIRS: &[&str] = &[
+    "/opt/homebrew/opt/postgresql/bin",
+    "/usr/local/opt/postgresql/bin",
+    "/Applications/Postgres.app/Contents/Versions/latest/bin",
+];
 const POSTGRES_CONF_BEGIN: &str = "# BEGIN PGSandbox local runtime";
 const POSTGRES_CONF_END: &str = "# END PGSandbox local runtime";
+
+static RESOLVED_LOCAL_POSTGRES_BIN_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Clone, Debug)]
 pub struct LocalPostgresCluster {
@@ -98,7 +109,7 @@ impl LocalPostgresCluster {
             return self.read_config();
         }
 
-        ensure_required_local_binaries()?;
+        let bin_dir = resolve_local_postgres_bin_dir()?;
         fs::create_dir_all(self.socket_dir()).with_context(|| {
             format!(
                 "failed to create local Postgres socket directory {}",
@@ -110,7 +121,7 @@ impl LocalPostgresCluster {
         let mut config = self.config_for_port(select_free_port()?, &password);
         write_password_file(&self.password_file(), &password)?;
 
-        let init_result = Command::new("initdb")
+        let init_result = Command::new(bin_dir.join("initdb"))
             .arg("-D")
             .arg(self.data_dir())
             .arg("--username")
@@ -155,7 +166,7 @@ impl LocalPostgresCluster {
 
         let original_config = config.clone();
         config = start_config_for_available_port(config, port_available, select_free_port)?;
-        ensure_postgres_binary("pg_ctl")?;
+        let bin_dir = resolve_local_postgres_bin_dir()?;
         fs::create_dir_all(&config.socket_dir).with_context(|| {
             format!(
                 "failed to create local Postgres socket directory {}",
@@ -167,16 +178,16 @@ impl LocalPostgresCluster {
             return Err(self.restore_start_config_after_error(&original_config, error));
         }
 
-        if let Err(error) = command_status(
+        if let Err(error) = command_output(
             "pg_ctl",
-            Command::new("pg_ctl")
+            Command::new(bin_dir.join("pg_ctl"))
                 .arg("-D")
                 .arg(&config.data_dir)
                 .arg("-l")
                 .arg(&config.log_file)
                 .arg("-w")
                 .arg("start")
-                .status(),
+                .output(),
         ) {
             return Err(self.restore_start_config_after_error(&original_config, error));
         }
@@ -204,17 +215,17 @@ impl LocalPostgresCluster {
             return Ok(());
         }
 
-        ensure_postgres_binary("pg_ctl")?;
-        command_status(
+        let bin_dir = resolve_local_postgres_bin_dir()?;
+        command_output(
             "pg_ctl",
-            Command::new("pg_ctl")
+            Command::new(bin_dir.join("pg_ctl"))
                 .arg("-D")
                 .arg(self.data_dir())
                 .arg("-m")
                 .arg("fast")
                 .arg("-w")
                 .arg("stop")
-                .status(),
+                .output(),
         )
     }
 
@@ -341,15 +352,17 @@ impl LocalPostgresCluster {
             return Ok(false);
         }
 
-        ensure_postgres_binary("pg_ctl")?;
-        match Command::new("pg_ctl")
+        let bin_dir = resolve_local_postgres_bin_dir()?;
+        match Command::new(bin_dir.join("pg_ctl"))
             .arg("-D")
             .arg(self.data_dir())
             .arg("status")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
         {
             Ok(status) => Ok(status.success()),
-            Err(error) if error.kind() == ErrorKind::NotFound => missing_binary("pg_ctl"),
+            Err(error) if error.kind() == ErrorKind::NotFound => missing_local_postgres_binaries(),
             Err(error) => Err(error).context("failed to run pg_ctl status"),
         }
     }
@@ -364,13 +377,6 @@ where
 
 fn required_local_binaries() -> &'static [&'static str] {
     REQUIRED_LOCAL_BINARIES
-}
-
-fn ensure_required_local_binaries() -> anyhow::Result<()> {
-    for binary in required_local_binaries() {
-        ensure_postgres_binary(binary)?;
-    }
-    Ok(())
 }
 
 fn select_free_port() -> anyhow::Result<u16> {
@@ -415,21 +421,132 @@ fn local_admin_password() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
-fn ensure_postgres_binary(binary: &'static str) -> anyhow::Result<()> {
-    match Command::new(binary).arg("--version").output() {
-        Ok(output) if output.status.success() => Ok(()),
-        Ok(output) => anyhow::bail!(
-            "Postgres binary `{binary}` is installed but failed to run: {}",
-            summarize_stderr(&output.stderr)
-        ),
-        Err(error) if error.kind() == ErrorKind::NotFound => missing_binary(binary),
-        Err(error) => Err(error).with_context(|| format!("failed to run `{binary} --version`")),
+fn resolve_local_postgres_bin_dir() -> anyhow::Result<PathBuf> {
+    if let Some(dir) = RESOLVED_LOCAL_POSTGRES_BIN_DIR.get() {
+        return Ok(dir.clone());
+    }
+
+    let dir = probe_local_postgres_bin_dir(local_postgres_bin_dirs(std::env::var_os("PATH")))?;
+    let _ = RESOLVED_LOCAL_POSTGRES_BIN_DIR.set(dir.clone());
+    Ok(dir)
+}
+
+fn probe_local_postgres_bin_dir(dirs: Vec<PathBuf>) -> anyhow::Result<PathBuf> {
+    let mut first_failure = None;
+
+    'candidate: for dir in dirs {
+        if !required_local_binaries()
+            .iter()
+            .all(|binary| dir.join(binary).is_file())
+        {
+            continue;
+        }
+        for binary in required_local_binaries() {
+            let path = dir.join(binary);
+            match Command::new(&path).arg("--version").output() {
+                Ok(output) if output.status.success() => {}
+                Ok(output) => {
+                    first_failure.get_or_insert_with(|| {
+                        format!(
+                            "Postgres binary `{}` is installed at {} but failed to run: {}",
+                            binary,
+                            path.display(),
+                            summarize_stderr(command_failure_output(&output))
+                        )
+                    });
+                    continue 'candidate;
+                }
+                Err(error) if error.kind() == ErrorKind::NotFound => continue 'candidate,
+                Err(error) => {
+                    first_failure.get_or_insert_with(|| {
+                        format!("failed to run `{} --version`: {error}", path.display())
+                    });
+                    continue 'candidate;
+                }
+            }
+        }
+        return Ok(dir);
+    }
+
+    if let Some(first_failure) = first_failure {
+        anyhow::bail!(
+            "Postgres server binaries `initdb`, `pg_ctl`, and `postgres` were found in local install locations, but no complete set ran successfully. First failure: {first_failure}"
+        );
+    }
+
+    missing_local_postgres_binaries()
+}
+
+fn local_postgres_bin_dirs(path: Option<OsString>) -> Vec<PathBuf> {
+    let homebrew_roots = HOMEBREW_OPT_ROOTS
+        .iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    local_postgres_bin_dirs_with_roots(path, &homebrew_roots)
+}
+
+fn local_postgres_bin_dirs_with_roots(
+    path: Option<OsString>,
+    homebrew_roots: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut seen = BTreeSet::new();
+    let mut dirs = Vec::new();
+    if let Some(path) = path {
+        for dir in std::env::split_paths(&path) {
+            push_unique_dir(&mut dirs, &mut seen, dir);
+        }
+    }
+    for dir in homebrew_postgres_bin_dirs(homebrew_roots) {
+        push_unique_dir(&mut dirs, &mut seen, dir);
+    }
+    for dir in COMMON_LOCAL_POSTGRES_BIN_DIRS {
+        push_unique_dir(&mut dirs, &mut seen, PathBuf::from(dir));
+    }
+    dirs
+}
+
+fn push_unique_dir(dirs: &mut Vec<PathBuf>, seen: &mut BTreeSet<PathBuf>, dir: PathBuf) {
+    if seen.insert(dir.clone()) {
+        dirs.push(dir);
     }
 }
 
-fn missing_binary<T>(binary: &'static str) -> anyhow::Result<T> {
+fn homebrew_postgres_bin_dirs(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut versioned = Vec::new();
+    let mut unversioned = Vec::new();
+
+    for root in roots {
+        let Ok(entries) = fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "postgresql" {
+                unversioned.push(entry.path().join("bin"));
+                continue;
+            }
+            if let Some(version) = name
+                .strip_prefix("postgresql@")
+                .and_then(|version| version.parse::<u32>().ok())
+            {
+                versioned.push((version, entry.path().join("bin")));
+            }
+        }
+    }
+
+    versioned.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    unversioned.sort();
+
+    versioned
+        .into_iter()
+        .map(|(_, path)| path)
+        .chain(unversioned)
+        .collect()
+}
+
+fn missing_local_postgres_binaries<T>() -> anyhow::Result<T> {
     anyhow::bail!(
-        "Postgres binary `{binary}` was not found on PATH. Install PostgreSQL locally so PGSandbox can manage ~/.pgsandbox/postgres without using Docker."
+        "Postgres server binaries `initdb`, `pg_ctl`, and `postgres` were not found together on PATH or in common local install locations. Install PostgreSQL locally so PGSandbox can manage ~/.pgsandbox/postgres without using Docker."
     )
 }
 
@@ -439,18 +556,17 @@ fn command_output(
 ) -> anyhow::Result<()> {
     match result {
         Ok(output) if output.status.success() => Ok(()),
-        Ok(output) => failed_command(binary, output.status, &output.stderr),
-        Err(error) if error.kind() == ErrorKind::NotFound => missing_binary(binary),
+        Ok(output) => failed_command(binary, output.status, command_failure_output(&output)),
+        Err(error) if error.kind() == ErrorKind::NotFound => missing_local_postgres_binaries(),
         Err(error) => Err(error).with_context(|| format!("failed to start `{binary}`")),
     }
 }
 
-fn command_status(binary: &'static str, result: std::io::Result<ExitStatus>) -> anyhow::Result<()> {
-    match result {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => failed_command(binary, status, &[]),
-        Err(error) if error.kind() == ErrorKind::NotFound => missing_binary(binary),
-        Err(error) => Err(error).with_context(|| format!("failed to start `{binary}`")),
+fn command_failure_output(output: &Output) -> &[u8] {
+    if output.stderr.iter().any(|byte| !byte.is_ascii_whitespace()) {
+        &output.stderr
+    } else {
+        &output.stdout
     }
 }
 
@@ -623,6 +739,67 @@ mod tests {
         assert!(binaries.contains(&"initdb"));
         assert!(binaries.contains(&"pg_ctl"));
         assert!(binaries.contains(&"postgres"));
+    }
+
+    #[test]
+    fn local_postgres_binary_search_keeps_path_order_and_common_installs() {
+        let path = std::env::join_paths([
+            PathBuf::from("/tmp/pg-one"),
+            PathBuf::from("/tmp/pg-two"),
+            PathBuf::from("/tmp/pg-one"),
+        ])
+        .unwrap();
+        let dirs = local_postgres_bin_dirs(Some(path));
+
+        assert_eq!(dirs[0], PathBuf::from("/tmp/pg-one"));
+        assert_eq!(dirs[1], PathBuf::from("/tmp/pg-two"));
+        assert!(dirs.contains(&PathBuf::from(
+            "/Applications/Postgres.app/Contents/Versions/latest/bin"
+        )));
+    }
+
+    #[test]
+    fn homebrew_postgres_binary_search_discovers_future_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir_all(directory.path().join("postgresql@17/bin")).unwrap();
+        fs::create_dir_all(directory.path().join("postgresql@19/bin")).unwrap();
+        fs::create_dir_all(directory.path().join("postgresql/bin")).unwrap();
+        fs::create_dir_all(directory.path().join("not-postgres@20/bin")).unwrap();
+
+        let dirs = local_postgres_bin_dirs_with_roots(None, &[directory.path().to_path_buf()]);
+
+        assert_eq!(dirs[0], directory.path().join("postgresql@19/bin"));
+        assert_eq!(dirs[1], directory.path().join("postgresql@17/bin"));
+        assert_eq!(dirs[2], directory.path().join("postgresql/bin"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn postgres_binary_probe_skips_broken_candidate_directories() {
+        use std::{io::Write, os::unix::fs::PermissionsExt};
+
+        let directory = tempfile::tempdir().unwrap();
+        let broken = directory.path().join("broken");
+        let working = directory.path().join("working");
+        fs::create_dir_all(&broken).unwrap();
+        fs::create_dir_all(&working).unwrap();
+
+        for binary in required_local_binaries() {
+            write_executable(&broken.join(binary), "#!/bin/sh\necho broken\nexit 1\n");
+            write_executable(&working.join(binary), "#!/bin/sh\necho version\nexit 0\n");
+        }
+
+        let resolved = probe_local_postgres_bin_dir(vec![broken, working.clone()]).unwrap();
+
+        assert_eq!(resolved, working);
+
+        fn write_executable(path: &Path, content: &str) {
+            let mut file = fs::File::create(path).unwrap();
+            file.write_all(content.as_bytes()).unwrap();
+            let mut permissions = fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).unwrap();
+        }
     }
 
     #[test]
