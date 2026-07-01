@@ -11,6 +11,7 @@ use std::{
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub const LOCAL_PROFILE_NAME: &str = "local";
@@ -21,7 +22,6 @@ const DATA_DIR: &str = "postgres/data";
 const LOCK_FILE_NAME: &str = "local-postgres.lock";
 const LOG_FILE: &str = "postgres/postgres.log";
 const PASSWORD_FILE: &str = "postgres/initdb-password";
-const SOCKET_DIR: &str = "postgres/run";
 const DEFAULT_LOCAL_PORT: u16 = 65432;
 #[cfg(test)]
 const REQUIRED_LOCAL_BINARIES: &[&str] = &["initdb", "pg_ctl", "postgres"];
@@ -198,6 +198,7 @@ impl LocalPostgresCluster {
 
         let original_config = config.clone();
         config = start_config_for_available_port(config, port_available, select_free_port)?;
+        config.socket_dir = self.socket_dir();
         let binaries =
             resolve_postgres_binaries_for_config(&config, self.postgres_version.as_deref())?;
         fs::create_dir_all(&config.socket_dir).with_context(|| {
@@ -411,15 +412,7 @@ impl LocalPostgresCluster {
     }
 
     fn socket_dir(&self) -> PathBuf {
-        match &self.postgres_version {
-            Some(version) => self
-                .root
-                .join("postgres")
-                .join("versions")
-                .join(version)
-                .join("run"),
-            None => self.root.join(SOCKET_DIR),
-        }
+        short_socket_root().join(socket_dir_id(&self.root, self.postgres_version.as_deref()))
     }
 
     fn write_config(&self, config: &LocalClusterConfig) -> anyhow::Result<()> {
@@ -944,6 +937,34 @@ fn local_admin_password() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
+fn short_socket_root() -> PathBuf {
+    #[cfg(unix)]
+    {
+        PathBuf::from("/tmp/pgsandbox-sockets")
+    }
+    #[cfg(not(unix))]
+    {
+        env::temp_dir().join("pgsandbox-sockets")
+    }
+}
+
+fn socket_dir_id(root: &Path, postgres_version: Option<&str>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(root.to_string_lossy().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(postgres_version.unwrap_or("default").as_bytes());
+    let digest = hasher.finalize();
+    let suffix = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    match postgres_version {
+        Some(version) => format!("pg{version}-{suffix}"),
+        None => format!("default-{suffix}"),
+    }
+}
+
 #[cfg(test)]
 fn probe_local_postgres_bin_dir(dirs: Vec<PathBuf>) -> anyhow::Result<PathBuf> {
     let mut first_failure = None;
@@ -1358,7 +1379,7 @@ mod tests {
         let saved = cluster.read_config().unwrap();
         assert_eq!(saved.port, 65432);
         assert_eq!(saved.data_dir, directory.path().join(DATA_DIR));
-        assert_eq!(saved.socket_dir, directory.path().join(SOCKET_DIR));
+        assert!(saved.socket_dir.starts_with(short_socket_root()));
         assert_eq!(saved.admin_url, config.admin_url);
     }
 
@@ -1382,13 +1403,28 @@ mod tests {
             config.data_dir,
             directory.path().join("postgres/versions/16/data")
         );
-        assert_eq!(
-            config.socket_dir,
-            directory.path().join("postgres/versions/16/run")
-        );
+        assert!(config.socket_dir.starts_with(short_socket_root()));
         assert_eq!(
             config.log_file,
             directory.path().join("postgres/versions/16/postgres.log")
+        );
+    }
+
+    #[test]
+    fn socket_dir_uses_short_tmp_path_for_deep_state_roots() {
+        let deep_root = PathBuf::from(format!(
+            "/var/folders/mx/{}/T/pgsandbox-fail-log-{}",
+            "nested".repeat(12),
+            "suffix".repeat(8)
+        ));
+        let cluster = LocalPostgresCluster::new(deep_root);
+        let socket_dir = cluster.socket_dir();
+
+        assert!(socket_dir.starts_with(short_socket_root()));
+        assert!(
+            socket_dir.join(".s.PGSQL.65435").to_string_lossy().len() < 103,
+            "socket path should fit macOS Postgres unix socket limit: {}",
+            socket_dir.display()
         );
     }
 

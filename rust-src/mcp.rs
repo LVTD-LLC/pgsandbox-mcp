@@ -211,7 +211,7 @@ impl PgsandboxServer {
             ("hasProfile", json!(input.profile.is_some())),
             ("hasDatabaseId", json!(input.database_id.is_some())),
             ("hasDatabaseName", json!(input.database_name.is_some())),
-            ("hasBaseDigest", json!(!input.base_digest.is_null())),
+            ("hasBaseDigest", json!(true)),
         ]);
         self.tracked_tool(
             "schema_diff",
@@ -555,12 +555,138 @@ fn tool_json<T: Serialize>(result: anyhow::Result<T>) -> Result<CallToolResult, 
             let text = serde_json::to_string_pretty(&value).map_err(internal_error)?;
             Ok(CallToolResult::success(vec![Content::text(text)]))
         }
-        Err(error) => Ok(CallToolResult::error(vec![Content::text(
-            error.to_string(),
-        )])),
+        Err(error) => {
+            let text = serde_json::to_string_pretty(&ToolErrorResponse::from_error(&error))
+                .map_err(internal_error)?;
+            Ok(CallToolResult::error(vec![Content::text(text)]))
+        }
     }
 }
 
 fn internal_error(error: impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(error.to_string(), None)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ToolErrorResponse {
+    ok: bool,
+    error: ToolErrorBody,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ToolErrorBody {
+    code: &'static str,
+    category: &'static str,
+    message: String,
+    hint: String,
+}
+
+impl ToolErrorResponse {
+    fn from_error(error: &anyhow::Error) -> Self {
+        let chain = sanitize_error_message(&format!("{error:#}"));
+        let lower = chain.to_ascii_lowercase();
+        let body = if lower.contains("password authentication failed")
+            || lower.contains("authentication failed")
+        {
+            ToolErrorBody {
+                code: "postgres_auth_failed",
+                category: "postgres",
+                message: chain,
+                hint: "Run `pgsandbox-mcp doctor` to identify the active config source. If an MCP client config has a stale explicit PGSANDBOX_ADMIN_DATABASE_URL, run `pgsandbox-mcp setup --client <client>` without --admin-url, restart the MCP client, and retry.".to_string(),
+            }
+        } else if lower.contains("could not find local postgres")
+            || lower.contains("failed to prepare local postgres profile")
+            || lower.contains("failed to prepare default local postgres profile")
+        {
+            ToolErrorBody {
+                code: "local_postgres_unavailable",
+                category: "local_postgres",
+                message: chain,
+                hint: "Install local PostgreSQL server binaries for the requested major version, set PGSANDBOX_POSTGRES_BIN_DIR or PGSANDBOX_POSTGRES_<MAJOR>_BIN_DIR, or choose a version shown by list_profiles.".to_string(),
+            }
+        } else if lower.contains("no configured profile advertises postgresversion")
+            || lower.contains("unknown postgres version")
+        {
+            ToolErrorBody {
+                code: "postgres_version_unavailable",
+                category: "config",
+                message: chain,
+                hint: "Use a postgresVersion listed by list_profiles, add a matching explicit profile, or rerun setup without --admin-url to use managed local version discovery.".to_string(),
+            }
+        } else if lower.contains("connection refused")
+            || lower.contains("connection timed out")
+            || lower.contains("failed to connect")
+        {
+            ToolErrorBody {
+                code: "postgres_connection_failed",
+                category: "postgres",
+                message: chain,
+                hint: "Run `pgsandbox-mcp doctor` to verify the configured profile and connectivity. For managed local, try `pgsandbox-mcp local status` or `pgsandbox-mcp local start`.".to_string(),
+            }
+        } else {
+            ToolErrorBody {
+                code: "pgsandbox_tool_failed",
+                category: "unknown",
+                message: chain,
+                hint: "Run `pgsandbox-mcp doctor` for a local diagnostic, then retry the tool with the same profile or postgresVersion.".to_string(),
+            }
+        };
+
+        Self {
+            ok: false,
+            error: body,
+        }
+    }
+}
+
+fn sanitize_error_message(message: &str) -> String {
+    message
+        .split_whitespace()
+        .map(sanitize_error_token)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn sanitize_error_token(token: &str) -> String {
+    let Some((scheme, rest)) = token.split_once("://") else {
+        return token.to_string();
+    };
+    if !matches!(scheme, "postgres" | "postgresql") {
+        return token.to_string();
+    }
+    let Some((credentials, suffix)) = rest.split_once('@') else {
+        return token.to_string();
+    };
+    let Some((user, _password)) = credentials.split_once(':') else {
+        return token.to_string();
+    };
+    format!("{scheme}://{user}:****@{suffix}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_errors_are_structured_and_actionable() {
+        let result = tool_json::<()>(Err(anyhow::anyhow!(
+            "failed to connect to Postgres admin profile default at postgresql://postgres:****@localhost:5432/postgres?sslmode=disable: db error: FATAL: password authentication failed for user \"postgres\""
+        )))
+        .unwrap();
+
+        assert!(result.is_error.unwrap_or(false));
+        let text = result.content[0].as_text().unwrap().text.clone();
+        let value = serde_json::from_str::<Value>(&text).unwrap();
+
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["error"]["code"], "postgres_auth_failed");
+        assert_eq!(value["error"]["category"], "postgres");
+        assert!(value["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("pgsandbox-mcp doctor"));
+        assert!(!text.contains("postgres:postgres@"));
+    }
 }

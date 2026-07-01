@@ -21,6 +21,15 @@ Workflow-oriented tools return a compact result envelope:
 - `errors`: structured `code`, `message`, and optional `hint`
 - `detailHandles`: opaque pointers agents can use in follow-up calls
 - `result`: workflow-specific output when available
+- `createdSandbox`: for `create_sandbox_from_template`, the same created
+  sandbox payload is also exposed at the top level so agents do not need to
+  special-case the workflow envelope.
+
+Tool failures are returned as MCP tool errors whose text content is a safe JSON
+object with `ok: false`, `error.code`, `error.category`, `error.message`, and
+`error.hint`. Passwords and full connection strings are masked. Typical codes
+include `postgres_auth_failed`, `postgres_connection_failed`,
+`postgres_version_unavailable`, and `local_postgres_unavailable`.
 
 ## `create_database`
 
@@ -53,8 +62,18 @@ Inputs:
 
 Returns:
 
+- `serverVersion`
+- `toolCount`
+- `restartRequiredAfterSetup`
+- `availablePostgresVersions`
+- `hints`
 - `profiles`: profile summaries with `name`, `postgresVersion`, `managedLocal`,
   masked `adminUrl`, and `source`
+
+Use `includeDiscoveredLocal: true` before requesting a `postgresVersion`. The
+server does not download Postgres; the requested major must be installed locally
+or supplied through `PGSANDBOX_POSTGRES_BIN_DIR` or
+`PGSANDBOX_POSTGRES_<MAJOR>_BIN_DIR`.
 
 ## `clone_database`
 
@@ -151,7 +170,9 @@ Inputs:
 
 Returns:
 
-- structured schema summary
+- structured schema summary. Tables and columns include camelCase inspection
+  keys such as `tableName`, `tableSchema`, `columnName`, `dataType`, and
+  `isNullable`, with legacy source column names retained where applicable.
 
 ## `schema_digest`
 
@@ -183,7 +204,30 @@ Inputs:
 
 - `profile`: optional Postgres profile name
 - `databaseId` or `databaseName`
-- `baseDigest`: a previous `schema_digest` response
+- `baseDigest`: a previous `schema_digest` response object. A JSON string that
+  contains the full serialized `schema_digest` response is also accepted for
+  agent workflows that pass tool output through string-only storage. A checksum
+  string alone is not enough to compute a diff.
+
+Example:
+
+```json
+{
+  "databaseId": "6d4b...",
+  "baseDigest": {
+    "databaseId": "6d4b...",
+    "databaseName": "pgsandbox_app_abc12345",
+    "digestVersion": 1,
+    "checksum": "...",
+    "tableCount": 1,
+    "columnCount": 3,
+    "indexCount": 1,
+    "extensionCount": 1,
+    "tables": [],
+    "extensions": []
+  }
+}
+```
 
 Returns:
 
@@ -362,7 +406,8 @@ Inputs:
 - `owner`
 - `labels`
 
-Returns the new sandbox metadata and connection string.
+Returns the new sandbox metadata and connection string. The workflow envelope
+includes the payload under both `result` and `createdSandbox`.
 
 ### `list_templates`
 
@@ -392,7 +437,10 @@ Inputs:
 
 Returns:
 
-- `databases`: database metadata without full secrets
+- `databases`: database metadata without full secrets. New callers should use
+  camelCase keys such as `databaseId`, `databaseName`, `roleName`, `profile`,
+  `createdAt`, and `expiresAt`. Legacy snake_case aliases remain present for
+  compatibility.
 - `truncated`: whether more matching records exist beyond the returned page
 
 ## `cleanup_expired`

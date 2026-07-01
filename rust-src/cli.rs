@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::Context;
 
 use crate::{
-    config::{load_config, load_config_from_env},
+    config::{load_config, load_config_deferred_local, load_config_from_env},
     doctor::{mask_connection_string, run_doctor},
     local::{LocalClusterConfig, LocalClusterStatus, LocalPostgresCluster},
     mcp::serve_stdio,
@@ -58,7 +58,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<u8> {
 }
 
 async fn start_server() -> anyhow::Result<()> {
-    serve_stdio(load_config()?).await
+    serve_stdio(load_config_deferred_local()?).await
 }
 
 async fn setup(args: &[String]) -> anyhow::Result<u8> {

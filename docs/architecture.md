@@ -100,8 +100,10 @@ the generic `PGSANDBOX_POSTGRES_BIN_DIR`, common package-manager locations, or
 
 The local runtime starts at port `65432` and scans upward for a free high port,
 so a Docker container or developer database on `5432` is not disturbed. It also
-sets `unix_socket_directories` to a PGSandbox-owned run directory for local
-socket access by Postgres tools.
+sets `unix_socket_directories` to a short PGSandbox-owned directory under
+`/tmp/pgsandbox-sockets/` on Unix. Keeping sockets outside deep
+`PGSANDBOX_HOME` trees avoids macOS Postgres socket path limits while data,
+logs, and private config remain under the managed state directory.
 
 ## Profiles
 

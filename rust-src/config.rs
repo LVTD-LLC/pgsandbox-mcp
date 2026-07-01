@@ -9,6 +9,8 @@ use crate::local::{LocalClusterConfig, LocalPostgresCluster, LOCAL_PROFILE_NAME}
 const DEFAULT_DATABASE_PREFIX: &str = "pgsandbox";
 const DEFAULT_TTL_MINUTES: u32 = 240;
 const DEFAULT_MAX_TTL_MINUTES: u32 = 1440;
+pub(crate) const DEFERRED_LOCAL_ADMIN_URL: &str =
+    "postgres://pgsandbox_admin:deferred@127.0.0.1:0/postgres?sslmode=disable";
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -125,24 +127,46 @@ pub fn load_config() -> Result<SandboxConfig, ConfigError> {
     load_config_from_env(env::vars())
 }
 
+pub fn load_config_deferred_local() -> Result<SandboxConfig, ConfigError> {
+    load_config_from_env_deferred_local(env::vars())
+}
+
 pub fn load_config_from_env<I, K, V>(vars: I) -> Result<SandboxConfig, ConfigError>
 where
     I: IntoIterator<Item = (K, V)>,
     K: Into<String>,
     V: Into<String>,
 {
-    load_config_from_env_with_local(vars, |postgres_version| {
-        let config = LocalPostgresCluster::from_env_for_version(postgres_version)
-            .map_err(|error| ConfigError::LocalPostgres(error.to_string()))?
-            .ensure_started()
-            .map_err(|error| ConfigError::LocalPostgres(error.to_string()))?;
-        Ok(config)
-    })
+    load_config_from_env_with_local(
+        vars,
+        |postgres_version| {
+            let config = LocalPostgresCluster::from_env_for_version(postgres_version)
+                .map_err(|error| ConfigError::LocalPostgres(error.to_string()))?
+                .ensure_started()
+                .map_err(|error| ConfigError::LocalPostgres(error.to_string()))?;
+            Ok(config)
+        },
+        false,
+    )
+}
+
+pub fn load_config_from_env_deferred_local<I, K, V>(vars: I) -> Result<SandboxConfig, ConfigError>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<String>,
+    V: Into<String>,
+{
+    load_config_from_env_with_local(
+        vars,
+        |_| unreachable!("deferred managed local loading must not start Postgres"),
+        true,
+    )
 }
 
 fn load_config_from_env_with_local<I, K, V, F>(
     vars: I,
     local_admin_url: F,
+    defer_managed_local: bool,
 ) -> Result<SandboxConfig, ConfigError>
 where
     I: IntoIterator<Item = (K, V)>,
@@ -179,7 +203,11 @@ where
                     if default_profile != LOCAL_PROFILE_NAME {
                         return Err(ConfigError::MissingDefaultProfile(default_profile));
                     }
-                    let local = local_admin_url(requested_postgres_version)?;
+                    let local = if defer_managed_local {
+                        deferred_local_cluster_config(requested_postgres_version)?
+                    } else {
+                        local_admin_url(requested_postgres_version)?
+                    };
                     (
                         local.admin_url,
                         local.profile_name,
@@ -230,6 +258,39 @@ where
 
     apply_telemetry_env_overrides(&mut config.telemetry, &env);
     Ok(config)
+}
+
+fn deferred_local_cluster_config(
+    requested_postgres_version: Option<&str>,
+) -> Result<LocalClusterConfig, ConfigError> {
+    let postgres_version = requested_postgres_version
+        .map(|value| {
+            let normalized = normalize_postgres_version(value);
+            if normalized.is_empty() {
+                Err(ConfigError::LocalPostgres(
+                    "postgresVersion must start with a numeric major version".to_string(),
+                ))
+            } else {
+                Ok(normalized)
+            }
+        })
+        .transpose()?;
+    let profile_name = postgres_version
+        .as_ref()
+        .map(|version| format!("local-pg{version}"))
+        .unwrap_or_else(|| LOCAL_PROFILE_NAME.to_string());
+
+    Ok(LocalClusterConfig {
+        profile_name,
+        postgres_version,
+        postgres_bin_dir: None,
+        admin_url: DEFERRED_LOCAL_ADMIN_URL.to_string(),
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        data_dir: std::path::PathBuf::new(),
+        socket_dir: std::path::PathBuf::new(),
+        log_file: std::path::PathBuf::new(),
+    })
 }
 
 pub fn parse_config_file(raw_json: &str) -> Result<SandboxConfig, ConfigError> {
@@ -537,22 +598,26 @@ mod tests {
     #[test]
     fn loads_managed_local_profile_when_no_admin_url_is_set() {
         let mut called = false;
-        let config = load_config_from_env_with_local(std::iter::empty::<(&str, &str)>(), |_| {
-            called = true;
-            Ok(crate::local::LocalClusterConfig {
-                profile_name: "local".to_string(),
-                admin_url:
-                    "postgres://pgsandbox_admin:secret@127.0.0.1:65432/postgres?sslmode=disable"
-                        .to_string(),
-                host: "127.0.0.1".to_string(),
-                port: 65432,
-                data_dir: "/tmp/pgsandbox/postgres/data".into(),
-                socket_dir: "/tmp/pgsandbox/postgres/run".into(),
-                log_file: "/tmp/pgsandbox/postgres/postgres.log".into(),
-                postgres_version: Some("16".to_string()),
-                postgres_bin_dir: None,
-            })
-        })
+        let config = load_config_from_env_with_local(
+            std::iter::empty::<(&str, &str)>(),
+            |_| {
+                called = true;
+                Ok(crate::local::LocalClusterConfig {
+                    profile_name: "local".to_string(),
+                    admin_url:
+                        "postgres://pgsandbox_admin:secret@127.0.0.1:65432/postgres?sslmode=disable"
+                            .to_string(),
+                    host: "127.0.0.1".to_string(),
+                    port: 65432,
+                    data_dir: "/tmp/pgsandbox/postgres/data".into(),
+                    socket_dir: "/tmp/pgsandbox/postgres/run".into(),
+                    log_file: "/tmp/pgsandbox/postgres/postgres.log".into(),
+                    postgres_version: Some("16".to_string()),
+                    postgres_bin_dir: None,
+                })
+            },
+            false,
+        )
         .unwrap();
 
         assert!(called);
@@ -571,10 +636,23 @@ mod tests {
     }
 
     #[test]
+    fn can_load_managed_local_profile_without_starting_cluster() {
+        let config = load_config_from_env_deferred_local(std::iter::empty::<(&str, &str)>())
+            .expect("deferred local config should load");
+
+        assert_eq!(config.default_profile, "local");
+        assert!(config.managed_local.enabled);
+        assert_eq!(config.profiles[0].name, "local");
+        assert!(config.profiles[0].managed_local);
+        assert_eq!(config.profiles[0].admin_url, DEFERRED_LOCAL_ADMIN_URL);
+    }
+
+    #[test]
     fn loads_requested_managed_local_postgres_version_from_env() {
         let mut requested_version = None;
-        let config =
-            load_config_from_env_with_local([("PGSANDBOX_POSTGRES_VERSION", "17")], |version| {
+        let config = load_config_from_env_with_local(
+            [("PGSANDBOX_POSTGRES_VERSION", "17")],
+            |version| {
                 requested_version = version.map(ToString::to_string);
                 Ok(crate::local::LocalClusterConfig {
                     profile_name: "local-pg17".to_string(),
@@ -589,8 +667,10 @@ mod tests {
                     postgres_version: Some("17".to_string()),
                     postgres_bin_dir: Some("/opt/postgresql@17/bin".into()),
                 })
-            })
-            .unwrap();
+            },
+            false,
+        )
+        .unwrap();
 
         assert_eq!(requested_version.as_deref(), Some("17"));
         assert_eq!(config.default_profile, "local-pg17");
@@ -656,6 +736,7 @@ mod tests {
                 "postgres://postgres:postgres@localhost/postgres",
             )],
             |_| panic!("local cluster should not start when an admin URL is explicit"),
+            false,
         )
         .unwrap();
 
@@ -668,11 +749,12 @@ mod tests {
 
     #[test]
     fn default_profile_without_admin_url_does_not_alias_local_profile() {
-        let err =
-            load_config_from_env_with_local([("PGSANDBOX_DEFAULT_PROFILE", "staging")], |_| {
-                panic!("local cluster should not start for an undefined requested profile")
-            })
-            .unwrap_err();
+        let err = load_config_from_env_with_local(
+            [("PGSANDBOX_DEFAULT_PROFILE", "staging")],
+            |_| panic!("local cluster should not start for an undefined requested profile"),
+            false,
+        )
+        .unwrap_err();
 
         assert!(err.to_string().contains("default profile does not exist"));
     }
