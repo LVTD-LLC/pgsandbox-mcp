@@ -270,8 +270,9 @@ locations such as Homebrew `postgresql@18`, `PGSANDBOX_POSTGRES_BIN_DIR`, or
 
 Before requesting a version, call MCP `list_profiles` with
 `includeDiscoveredLocal: true` or run `pgsandbox-mcp doctor`. The response shows
-the binary version, exposed tool count, discovered local Postgres majors, and a
-restart reminder for MCP clients that cache tool metadata. On macOS, install
+the binary version, exposed tool count, discovered local Postgres majors,
+profile version/port details when available, and a restart reminder for MCP
+clients that cache tool metadata. On macOS, install
 the major versions you need with Homebrew, for example:
 
 ```bash
@@ -325,6 +326,19 @@ MCP tools can select profiles by `profile` or by `postgresVersion` when profile
 metadata is present. On the managed local default, requesting `postgresVersion`
 starts the corresponding `local-pg<major>` cluster on demand when matching
 binaries are installed.
+
+For agent workflows, the canonical versioned-create shape is to omit `profile`
+and pass only `postgresVersion`, for example `{ "postgresVersion": "18" }`.
+Supplying both is reserved for intentionally targeting an exact versioned
+profile; mismatches return a structured `version_mismatch` error. Major-only
+version strings such as `"16"`, `"17"`, and `"18"` are canonical, and patch
+strings are normalized to the major.
+
+Sandbox `databaseId` lookup works across configured profiles and running
+managed-local profiles when the call provides only `databaseId`. If a database
+id cannot be resolved, the error tells the caller to retry with `profile` or
+`postgresVersion`, or to inspect active sandboxes with `list_databases` and
+`includeAllVersions: true`.
 
 If an MCP client still has a stale explicit `PGSANDBOX_ADMIN_DATABASE_URL`,
 database tools return structured errors with a safe code, category, message,
@@ -432,9 +446,22 @@ For a Django repo, an agent can:
    `create_template_from_sandbox`.
 
 Workflow tools use compact envelopes with `ok`, `summary`, structured
-`errors`, bounded output, and optional `changedObjects`. Commands are executed
-without a shell and receive sandbox credentials through environment variables,
-not permanent settings rewrites.
+`errors`, bounded output, and optional `changedObjects`. Command and tool
+errors include stable categories such as `database_not_found`,
+`version_mismatch`, `restore_incompatible`, `constraint_violation`,
+`readonly_violation`, and `template_not_found` so agents can branch without
+parsing prose. Commands are executed without a shell and receive sandbox
+credentials through environment variables, not permanent settings rewrites.
+
+By default, `list_databases` and `cleanup_expired` are scoped to the selected
+profile. Pass `includeAllVersions: true` or `postgresVersion: "*"` for an
+explicit cross-version listing or cleanup across configured profiles and running
+managed-local versions. Those all-version operations continue past individual
+profile connection failures and return profile-level `failures` entries. Clone
+requests preflight source and target Postgres majors before creating the target
+sandbox; newer-to-older clone paths fail with `restore_incompatible` and include
+`sourceVersion` and `targetVersion` instead of creating a sandbox and then
+failing during restore.
 
 ## Local Shape
 

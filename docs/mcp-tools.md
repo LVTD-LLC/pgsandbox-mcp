@@ -18,7 +18,7 @@ Workflow-oriented tools return a compact result envelope:
 - `summary`: short human-readable outcome
 - `changedObjects`: optional counts for schema changes
 - `warnings`: bounded warnings
-- `errors`: structured `code`, `message`, and optional `hint`
+- `errors`: structured `code`, `category`, `message`, and optional `hint`
 - `detailHandles`: opaque pointers agents can use in follow-up calls
 - `result`: workflow-specific output when available
 - `createdSandbox`: for `create_sandbox_from_template`, the same created
@@ -27,9 +27,21 @@ Workflow-oriented tools return a compact result envelope:
 
 Tool failures are returned as MCP tool errors whose text content is a safe JSON
 object with `ok: false`, `error.code`, `error.category`, `error.message`, and
-`error.hint`. Passwords and full connection strings are masked. Typical codes
-include `postgres_auth_failed`, `postgres_connection_failed`,
-`postgres_version_unavailable`, and `local_postgres_unavailable`.
+`error.hint`. Passwords and full connection strings are masked. Expected
+failure classes use stable categories such as `constraint_violation`,
+`readonly_violation`, `database_not_found`, `version_mismatch`,
+`restore_incompatible`, and `template_not_found`. Version diagnostics may also
+include `requestedVersion`, `sourceVersion`, `targetVersion`,
+`detectedVersions`, and a `detailHandle` pointing to `list_profiles` or
+`pgsandbox-mcp doctor` instead of embedding long local path traces. Typical
+codes include `postgres_auth_failed`,
+`postgres_connection_failed`, `postgres_version_unavailable`, and
+`local_postgres_unavailable`.
+
+When selecting a local major version, omit `profile` and pass only
+`postgresVersion`, for example `{ "postgresVersion": "18" }`. Supplying both is
+reserved for intentionally targeting an exact profile/version pair, and a
+mismatch returns `category: "version_mismatch"`.
 
 ## `create_database`
 
@@ -70,7 +82,9 @@ Returns:
 - `availablePostgresVersions`
 - `hints`
 - `profiles`: profile summaries with `name`, `postgresVersion`, `managedLocal`,
-  masked `adminUrl`, and `source`
+  `port`, masked `adminUrl`, and `source`. `port` is present when the profile
+  has a concrete admin URL; discoverable local versions that have not been
+  started yet report `adminUrl: "(managed local; starts on demand)"`.
 
 Use `includeDiscoveredLocal: true` before requesting a `postgresVersion`. The
 server does not download Postgres; the requested major must be installed locally
@@ -123,6 +137,7 @@ Deletes a database and role created by this MCP.
 Inputs:
 
 - `profile`: optional Postgres profile name
+- `postgresVersion`: optional Postgres major version
 - `databaseId` or `databaseName`
 
 Returns:
@@ -136,6 +151,7 @@ Returns the connection string for a database created by this MCP.
 Inputs:
 
 - `profile`: optional Postgres profile name
+- `postgresVersion`: optional Postgres major version
 - `databaseId` or `databaseName`
 
 Returns:
@@ -150,6 +166,7 @@ Runs SQL against an experiment database.
 Inputs:
 
 - `profile`: optional Postgres profile name
+- `postgresVersion`: optional Postgres major version
 - `databaseId` or `databaseName`
 - `sql`
 - `readonly`: optional boolean
@@ -168,6 +185,7 @@ Returns tables, columns, indexes, and extensions for an experiment database.
 Inputs:
 
 - `profile`: optional Postgres profile name
+- `postgresVersion`: optional Postgres major version
 - `databaseId` or `databaseName`
 
 Returns:
@@ -185,6 +203,7 @@ can be compared across sandboxes.
 Inputs:
 
 - `profile`: optional Postgres profile name
+- `postgresVersion`: optional Postgres major version
 - `databaseId` or `databaseName`
 
 Returns:
@@ -435,15 +454,24 @@ Lists active experiment databases.
 Inputs:
 
 - `profile`: optional Postgres profile name
+- `postgresVersion`: optional Postgres major version. Use `"*"` to list across
+  configured profiles and running managed-local version profiles.
+- `includeAllVersions`: optional boolean. When true, lists across configured
+  profiles and running managed-local version profiles. Do not combine with
+  `profile`.
 - `owner`: optional owner filter
 
 Returns:
 
+- `scope`: `"profile"` or `"allVersions"`
+- `profiles`: profiles included in the listing
 - `databases`: database metadata without full secrets. New callers should use
   camelCase keys such as `databaseId`, `databaseName`, `roleName`, `profile`,
   `createdAt`, and `expiresAt`. Legacy snake_case aliases remain present for
   compatibility.
 - `truncated`: whether more matching records exist beyond the returned page
+- `failures`: profile-level failures for all-version listings. Each entry has
+  `profile`, `category: "profile_unavailable"`, and a safe `message`.
 
 ## `cleanup_expired`
 
@@ -452,10 +480,44 @@ Deletes expired resources.
 Inputs:
 
 - `profile`: optional Postgres profile name
+- `postgresVersion`: optional Postgres major version. Use `"*"` to clean up
+  across configured profiles and running managed-local version profiles.
+- `includeAllVersions`: optional boolean. When true, cleans up across configured
+  profiles and running managed-local version profiles. Do not combine with
+  `profile`.
 - `dryRun`: optional boolean
 
 Returns:
 
+- `scope`: `"profile"` or `"allVersions"`
+- `profile`: selected profile for scoped cleanup
+- `profiles`: profiles included in the cleanup
+- `remainingProfiles`: other known profiles when cleanup was scoped to one
+  profile, so agents know whether another cleanup call may be needed
 - resources selected
 - resources deleted
-- failures
+- failures. All-version cleanup reports profile-level failures with `profile`,
+  `category: "profile_unavailable"`, and a safe `message` while continuing with
+  other profiles.
+
+## Stable Agent Contract
+
+`databaseId` is globally resolvable by database-id-only calls when the server can
+search configured profiles and running managed-local profiles. If a profile
+cannot be searched or the id is not found, the error uses
+`category: "database_not_found"` and tells the caller to retry with
+`profile`/`postgresVersion` or call `list_databases` with
+`includeAllVersions=true`.
+
+Unversioned `list_databases` and `cleanup_expired` are scoped to the selected
+default profile. Use `includeAllVersions=true` or `postgresVersion: "*"` when an
+agent needs a cross-version view or cleanup pass.
+
+Major-only version strings such as `"16"`, `"17"`, and `"18"` are canonical.
+Patch versions such as `"18.4"` are normalized to the major version for local
+profile selection.
+
+Clone downgrades are not supported by default. PGSandbox checks the source and
+target Postgres majors before creating the target sandbox and returns
+`category: "restore_incompatible"` when the source major is newer than the
+target. The error includes `sourceVersion` and `targetVersion`.

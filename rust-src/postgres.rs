@@ -120,6 +120,7 @@ pub struct RunSqlInput {
 pub struct ListDatabasesInput {
     pub profile: Option<String>,
     pub postgres_version: Option<String>,
+    pub include_all_versions: Option<bool>,
     pub owner: Option<String>,
 }
 
@@ -128,6 +129,7 @@ pub struct ListDatabasesInput {
 pub struct CleanupExpiredInput {
     pub profile: Option<String>,
     pub postgres_version: Option<String>,
+    pub include_all_versions: Option<bool>,
     pub dry_run: Option<bool>,
 }
 
@@ -289,8 +291,12 @@ pub struct ListProfilesInput {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListDatabasesOutput {
+    pub scope: String,
+    pub profiles: Vec<String>,
     pub databases: Vec<Value>,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -310,6 +316,7 @@ pub struct ProfileSummary {
     pub name: String,
     pub default: bool,
     pub postgres_version: Option<String>,
+    pub port: Option<u16>,
     pub managed_local: bool,
     pub admin_url: String,
     pub source: String,
@@ -381,6 +388,10 @@ pub struct DescribeSchemaOutput {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CleanupExpiredOutput {
+    pub scope: String,
+    pub profile: Option<String>,
+    pub profiles: Vec<String>,
+    pub remaining_profiles: Vec<String>,
     pub dry_run: bool,
     pub selected: Option<Vec<Value>>,
     pub deleted: Option<Vec<String>>,
@@ -499,6 +510,7 @@ pub struct WorkflowEnvelope<T: Serialize> {
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowError {
     pub code: String,
+    pub category: String,
     pub message: String,
     pub hint: Option<String>,
 }
@@ -901,6 +913,7 @@ impl PostgresSandboxManager {
                 name: profile.name.clone(),
                 default: profile.name == self.config.default_profile,
                 postgres_version: profile.postgres_version.clone(),
+                port: profile_admin_url_port(profile),
                 managed_local: profile.managed_local,
                 admin_url: profile_admin_url_summary(profile),
                 source: "configured".to_string(),
@@ -931,7 +944,8 @@ impl PostgresSandboxManager {
                 profiles.push(ProfileSummary {
                     name,
                     default: false,
-                    postgres_version: Some(installation.postgres_version),
+                    postgres_version: Some(installation.postgres_version.clone()),
+                    port: None,
                     managed_local: true,
                     admin_url: "(managed local; starts on demand)".to_string(),
                     source: installation.source,
@@ -958,6 +972,17 @@ impl PostgresSandboxManager {
         database_id: Option<String>,
         database_name: Option<String>,
     ) -> anyhow::Result<(SandboxProfile, SandboxRecord)> {
+        if selector_is_unscoped_database_id(
+            profile_name.as_ref(),
+            postgres_version.as_ref(),
+            database_id.as_ref(),
+            database_name.as_ref(),
+        ) {
+            return self
+                .get_owned_record_by_database_id(database_id.unwrap_or_default())
+                .await;
+        }
+
         let profile = self.resolve_profile(profile_name.as_deref(), postgres_version.as_deref())?;
         let (client, connection_task) = connect_admin(&profile).await?;
         ensure_metadata_table(&client).await?;
@@ -973,6 +998,68 @@ impl PostgresSandboxManager {
         drop(client);
         let _ = connection_task.await;
         Ok((profile, record))
+    }
+
+    async fn get_owned_record_by_database_id(
+        &self,
+        database_id: String,
+    ) -> anyhow::Result<(SandboxProfile, SandboxRecord)> {
+        let mut matches = Vec::new();
+        let mut search_errors = Vec::new();
+
+        for profile in self.profiles_for_all_version_operations()? {
+            let profile_name = profile.name.clone();
+            let search = async {
+                let (client, connection_task) = connect_admin(&profile).await?;
+                ensure_metadata_table(&client).await?;
+                let selector = DatabaseSelector {
+                    profile: None,
+                    postgres_version: None,
+                    database_id: Some(database_id.clone()),
+                    database_name: None,
+                };
+                let record = find_record(&client, &profile.name, &selector).await?;
+                drop(client);
+                let _ = connection_task.await;
+                anyhow::Ok(record)
+            }
+            .await;
+
+            match search {
+                Ok(Some(record)) => matches.push((profile, record)),
+                Ok(None) => {}
+                Err(error) => search_errors.push(format!("{profile_name}: {error:#}")),
+            }
+        }
+
+        match matches.len() {
+            1 => Ok(matches.remove(0)),
+            0 => {
+                let mut message = format!(
+                    "Database was not found in PGSandbox metadata for databaseId {database_id}. If this sandbox was created under a specific profile or postgresVersion, retry with that profile or postgresVersion, or call list_databases with includeAllVersions=true."
+                );
+                if !search_errors.is_empty() {
+                    let summarized = search_errors
+                        .into_iter()
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    message.push_str(" Some profiles could not be searched: ");
+                    message.push_str(&summarized);
+                }
+                anyhow::bail!(message)
+            }
+            _ => {
+                let profiles = matches
+                    .iter()
+                    .map(|(profile, _)| profile.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                anyhow::bail!(
+                    "databaseId {database_id} matched multiple PGSandbox profiles ({profiles}); retry with profile or postgresVersion."
+                )
+            }
+        }
     }
 
     pub async fn create_database(
@@ -1129,10 +1216,13 @@ impl PostgresSandboxManager {
             schema_only,
         } = input;
         let schema_only = schema_only.unwrap_or(false);
+        let target_profile =
+            self.resolve_profile(profile.as_deref(), postgres_version.as_deref())?;
+        preflight_clone_compatibility(&source_database_url, &target_profile).await?;
         let created = self
             .create_database(CreateDatabaseInput {
-                profile,
-                postgres_version,
+                profile: Some(target_profile.name.clone()),
+                postgres_version: None,
                 name_hint,
                 ttl_minutes,
                 owner,
@@ -1183,13 +1273,15 @@ impl PostgresSandboxManager {
         &self,
         input: DatabaseSelector,
     ) -> anyhow::Result<DeleteDatabaseOutput> {
-        let profile =
-            self.resolve_profile(input.profile.as_deref(), input.postgres_version.as_deref())?;
+        let (profile, record) = self
+            .get_owned_record(
+                input.profile,
+                input.postgres_version,
+                input.database_id,
+                input.database_name,
+            )
+            .await?;
         let (client, connection_task) = connect_admin(&profile).await?;
-        ensure_metadata_table(&client).await?;
-        let record = find_record(&client, &profile.name, &input)
-            .await?
-            .context("Database was not found in PGSandbox metadata.")?;
 
         terminate_database_connections(&client, &record.database_name).await?;
         client
@@ -1238,15 +1330,14 @@ impl PostgresSandboxManager {
         &self,
         input: DatabaseSelector,
     ) -> anyhow::Result<ConnectionStringOutput> {
-        let profile =
-            self.resolve_profile(input.profile.as_deref(), input.postgres_version.as_deref())?;
-        let (client, connection_task) = connect_admin(&profile).await?;
-        ensure_metadata_table(&client).await?;
-        let record = find_record(&client, &profile.name, &input)
-            .await?
-            .context("Database was not found in PGSandbox metadata.")?;
-        drop(client);
-        let _ = connection_task.await;
+        let (profile, record) = self
+            .get_owned_record(
+                input.profile,
+                input.postgres_version,
+                input.database_id,
+                input.database_name,
+            )
+            .await?;
 
         Ok(ConnectionStringOutput {
             database_id: record.database_id,
@@ -1265,10 +1356,62 @@ impl PostgresSandboxManager {
         &self,
         input: ListDatabasesInput,
     ) -> anyhow::Result<ListDatabasesOutput> {
+        if all_versions_requested(
+            input.postgres_version.as_deref(),
+            input.include_all_versions,
+        ) {
+            if input.profile.is_some() {
+                anyhow::bail!(
+                    "includeAllVersions/postgresVersion=\"*\" cannot be combined with profile; omit profile to list configured profiles and running managed-local versions."
+                );
+            }
+            let profiles = self.profiles_for_all_version_operations()?;
+            let profile_names = profiles
+                .iter()
+                .map(|profile| profile.name.clone())
+                .collect::<Vec<_>>();
+            let mut databases = Vec::new();
+            let mut failures = Vec::new();
+            let mut truncated = false;
+            for profile in &profiles {
+                match self
+                    .list_databases_for_profile(profile, input.owner.as_ref())
+                    .await
+                {
+                    Ok(result) => {
+                        truncated |= result.truncated;
+                        databases.extend(result.databases);
+                    }
+                    Err(error) => failures.push(profile_operation_failure(profile, error)),
+                }
+            }
+            if databases.len() > LIST_DATABASES_LIMIT {
+                databases.truncate(LIST_DATABASES_LIMIT);
+                truncated = true;
+            }
+            return Ok(ListDatabasesOutput {
+                scope: "allVersions".to_string(),
+                profiles: profile_names,
+                databases,
+                truncated,
+                failures,
+            });
+        }
+
         let profile =
             self.resolve_profile(input.profile.as_deref(), input.postgres_version.as_deref())?;
-        let (client, connection_task) = connect_admin(&profile).await?;
+        self.list_databases_for_profile(&profile, input.owner.as_ref())
+            .await
+    }
+
+    async fn list_databases_for_profile(
+        &self,
+        profile: &SandboxProfile,
+        owner: Option<&String>,
+    ) -> anyhow::Result<ListDatabasesOutput> {
+        let (client, connection_task) = connect_admin(profile).await?;
         ensure_metadata_table(&client).await?;
+        let owner = owner.map(String::as_str);
         let rows = client
             .query(
                 &format!(
@@ -1285,7 +1428,7 @@ impl PostgresSandboxManager {
                     quote_ident(METADATA_TABLE)?,
                     LIST_DATABASES_LIMIT + 1
                 ),
-                &[&profile.name, &input.owner],
+                &[&profile.name, &owner],
             )
             .await?;
         drop(client);
@@ -1293,12 +1436,15 @@ impl PostgresSandboxManager {
 
         let truncated = rows.len() > LIST_DATABASES_LIMIT;
         Ok(ListDatabasesOutput {
+            scope: "profile".to_string(),
+            profiles: vec![profile.name.clone()],
             databases: rows
                 .iter()
                 .take(LIST_DATABASES_LIMIT)
                 .map(record_summary_to_json)
                 .collect(),
             truncated,
+            failures: Vec::new(),
         })
     }
 
@@ -2291,9 +2437,69 @@ impl PostgresSandboxManager {
         &self,
         input: CleanupExpiredInput,
     ) -> anyhow::Result<CleanupExpiredOutput> {
+        let dry_run = input.dry_run.unwrap_or(false);
+        if all_versions_requested(
+            input.postgres_version.as_deref(),
+            input.include_all_versions,
+        ) {
+            if input.profile.is_some() {
+                anyhow::bail!(
+                    "includeAllVersions/postgresVersion=\"*\" cannot be combined with profile; omit profile to clean up configured profiles and running managed-local versions."
+                );
+            }
+            let profiles = self.profiles_for_all_version_operations()?;
+            let profile_names = profiles
+                .iter()
+                .map(|profile| profile.name.clone())
+                .collect::<Vec<_>>();
+            let mut selected = Vec::new();
+            let mut deleted = Vec::new();
+            let mut failures = Vec::new();
+            for profile in &profiles {
+                match self.cleanup_expired_for_profile(profile, dry_run).await {
+                    Ok(result) => {
+                        if let Some(profile_selected) = result.selected {
+                            selected.extend(profile_selected);
+                        }
+                        if let Some(profile_deleted) = result.deleted {
+                            deleted.extend(profile_deleted);
+                        }
+                        if let Some(profile_failures) = result.failures {
+                            failures.extend(profile_failures);
+                        }
+                    }
+                    Err(error) => failures.push(profile_operation_failure(profile, error)),
+                }
+            }
+            return Ok(CleanupExpiredOutput {
+                scope: "allVersions".to_string(),
+                profile: None,
+                profiles: profile_names,
+                remaining_profiles: Vec::new(),
+                dry_run,
+                selected: dry_run.then_some(selected),
+                deleted: (!dry_run).then_some(deleted),
+                failures: (!failures.is_empty() || !dry_run).then_some(failures),
+            });
+        }
+
         let profile =
             self.resolve_profile(input.profile.as_deref(), input.postgres_version.as_deref())?;
-        let (client, connection_task) = connect_admin(&profile).await?;
+        let mut result = self.cleanup_expired_for_profile(&profile, dry_run).await?;
+        result.remaining_profiles = self
+            .profile_names_for_scope_hint()
+            .into_iter()
+            .filter(|name| name != &profile.name)
+            .collect();
+        Ok(result)
+    }
+
+    async fn cleanup_expired_for_profile(
+        &self,
+        profile: &SandboxProfile,
+        dry_run: bool,
+    ) -> anyhow::Result<CleanupExpiredOutput> {
+        let (client, connection_task) = connect_admin(profile).await?;
         ensure_metadata_table(&client).await?;
         let expired = client
             .query(
@@ -2317,10 +2523,14 @@ impl PostgresSandboxManager {
             .map(sandbox_record_from_row)
             .collect::<Vec<_>>();
 
-        if input.dry_run.unwrap_or(false) {
+        if dry_run {
             drop(client);
             let _ = connection_task.await;
             return Ok(CleanupExpiredOutput {
+                scope: "profile".to_string(),
+                profile: Some(profile.name.clone()),
+                profiles: vec![profile.name.clone()],
+                remaining_profiles: Vec::new(),
                 dry_run: true,
                 selected: Some(records.iter().map(record_to_json).collect()),
                 deleted: None,
@@ -2396,11 +2606,71 @@ impl PostgresSandboxManager {
         let _ = connection_task.await;
 
         Ok(CleanupExpiredOutput {
+            scope: "profile".to_string(),
+            profile: Some(profile.name.clone()),
+            profiles: vec![profile.name.clone()],
+            remaining_profiles: Vec::new(),
             dry_run: false,
             selected: None,
             deleted: Some(deleted),
             failures: Some(failures),
         })
+    }
+
+    fn profiles_for_all_version_operations(&self) -> anyhow::Result<Vec<SandboxProfile>> {
+        let mut profiles = Vec::new();
+        for profile in &self.config.profiles {
+            let resolved = if profile.managed_local {
+                self.running_managed_local_profile(profile.postgres_version.as_deref())
+            } else {
+                Some(profile.clone())
+            };
+            if let Some(resolved) = resolved {
+                push_unique_profile(&mut profiles, resolved);
+            }
+        }
+        if self.config.managed_local.enabled {
+            for installation in discover_local_postgres_installations() {
+                if let Some(profile) =
+                    self.running_managed_local_profile(Some(&installation.postgres_version))
+                {
+                    push_unique_profile(&mut profiles, profile);
+                }
+            }
+        }
+        Ok(profiles)
+    }
+
+    fn running_managed_local_profile(
+        &self,
+        postgres_version: Option<&str>,
+    ) -> Option<SandboxProfile> {
+        let cluster = LocalPostgresCluster::from_env_for_version(postgres_version).ok()?;
+        let status = cluster.status().ok()?;
+        if !status.running {
+            return None;
+        }
+        status
+            .config
+            .map(|local_config| self.profile_from_local_config(local_config))
+    }
+
+    fn profile_names_for_scope_hint(&self) -> Vec<String> {
+        let mut names = self
+            .config
+            .profiles
+            .iter()
+            .map(|profile| profile.name.clone())
+            .collect::<Vec<_>>();
+        if self.config.managed_local.enabled {
+            for installation in discover_local_postgres_installations() {
+                let name = format!("local-pg{}", installation.postgres_version);
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        names
     }
 }
 
@@ -2442,12 +2712,29 @@ fn restart_required_after_setup_note() -> String {
     )
 }
 
+fn profile_operation_failure(profile: &SandboxProfile, error: anyhow::Error) -> Value {
+    json!({
+        "profile": profile.name,
+        "category": "profile_unavailable",
+        "message": format!("{error:#}"),
+    })
+}
+
 fn profile_admin_url_summary(profile: &SandboxProfile) -> String {
     if profile.managed_local && profile.admin_url == DEFERRED_LOCAL_ADMIN_URL {
         "(managed local; starts on demand)".to_string()
     } else {
         mask_connection_string(&profile.admin_url)
     }
+}
+
+fn profile_admin_url_port(profile: &SandboxProfile) -> Option<u16> {
+    if profile.managed_local && profile.admin_url == DEFERRED_LOCAL_ADMIN_URL {
+        return None;
+    }
+    Url::parse(&profile.admin_url)
+        .ok()
+        .and_then(|url| url.port())
 }
 
 fn workflow_success<T: Serialize>(
@@ -2500,10 +2787,27 @@ fn workflow_error(
     message: impl Into<String>,
     hint: Option<String>,
 ) -> WorkflowError {
+    let code = code.into();
     WorkflowError {
-        code: code.into(),
+        category: workflow_error_category(&code).to_string(),
+        code,
         message: message.into(),
         hint,
+    }
+}
+
+fn workflow_error_category(code: &str) -> &'static str {
+    match code {
+        "template_not_found" => "template_not_found",
+        "template_restore_failed" => "restore_failed",
+        "missing_migration_command"
+        | "missing_seed_command"
+        | "unsafe_migration_command"
+        | "unclear_command"
+        | "invalid_artifact_name"
+        | "repo_not_found" => "validation",
+        "migration_failed" | "seed_failed" => "command_failed",
+        _ => "workflow",
     }
 }
 
@@ -2517,6 +2821,35 @@ fn repo_not_found_error(repo_path: &Path) -> WorkflowError {
 
 fn selector_has_database(database_id: &Option<String>, database_name: &Option<String>) -> bool {
     database_id.is_some() || database_name.is_some()
+}
+
+fn selector_is_unscoped_database_id(
+    profile_name: Option<&String>,
+    postgres_version: Option<&String>,
+    database_id: Option<&String>,
+    database_name: Option<&String>,
+) -> bool {
+    profile_name.is_none()
+        && postgres_version.is_none()
+        && database_id.is_some()
+        && database_name.is_none()
+}
+
+fn all_versions_requested(
+    postgres_version: Option<&str>,
+    include_all_versions: Option<bool>,
+) -> bool {
+    include_all_versions.unwrap_or(false)
+        || postgres_version.is_some_and(|value| value.trim() == "*")
+}
+
+fn push_unique_profile(profiles: &mut Vec<SandboxProfile>, profile: SandboxProfile) {
+    if profiles
+        .iter()
+        .all(|existing| existing.name != profile.name)
+    {
+        profiles.push(profile);
+    }
 }
 
 async fn collect_schema_digest_for_url(database_url: &str) -> anyhow::Result<WorkflowSchemaDigest> {
@@ -2780,6 +3113,56 @@ fn schema_diff_summary(diff: &WorkflowSchemaDiffOutput) -> String {
 async fn postgres_version(client: &Client) -> anyhow::Result<String> {
     let row = client.query_one("SHOW server_version", &[]).await?;
     Ok(row.get::<_, String>(0))
+}
+
+async fn preflight_clone_compatibility(
+    source_database_url: &str,
+    target_profile: &SandboxProfile,
+) -> anyhow::Result<()> {
+    let source_version = postgres_server_version_for_url(source_database_url)
+        .await
+        .context("failed to inspect source Postgres version before clone")?;
+    let source_major = postgres_major_from_server_version(&source_version)?;
+    let target_major = postgres_major_for_profile(target_profile).await?;
+
+    if clone_downgrade_error(&source_major, &target_major).is_some() {
+        anyhow::bail!(
+            "restore_incompatible: cannot clone from Postgres {source_major} into older target Postgres {target_major}. Choose postgresVersion {source_major} or newer, or dump from an older-compatible source."
+        );
+    }
+
+    Ok(())
+}
+
+async fn postgres_server_version_for_url(database_url: &str) -> anyhow::Result<String> {
+    let (client, connection_task) = connect_url(database_url).await?;
+    let version = postgres_version(&client).await;
+    drop(client);
+    let _ = connection_task.await;
+    version
+}
+
+async fn postgres_major_for_profile(profile: &SandboxProfile) -> anyhow::Result<String> {
+    if let Some(version) = &profile.postgres_version {
+        return postgres_major_from_server_version(version);
+    }
+    let (client, connection_task) = connect_admin(profile).await?;
+    let version = postgres_version(&client).await;
+    drop(client);
+    let _ = connection_task.await;
+    postgres_major_from_server_version(&version?)
+}
+
+fn postgres_major_from_server_version(version: &str) -> anyhow::Result<String> {
+    leading_digits(version).context("Postgres server_version did not start with a major version")
+}
+
+fn clone_downgrade_error(source_major: &str, target_major: &str) -> Option<String> {
+    let source = source_major.parse::<u32>().ok()?;
+    let target = target_major.parse::<u32>().ok()?;
+    (source > target).then(|| {
+        format!("source Postgres {source_major} is newer than target Postgres {target_major}")
+    })
 }
 
 fn default_django_migration_command() -> Vec<String> {
@@ -5519,6 +5902,146 @@ mod tests {
             .hints
             .iter()
             .any(|hint| hint.contains("without --admin-url")));
+        let profile = serde_json::to_value(&output.profiles[0]).unwrap();
+        assert!(profile.get("serverVersion").is_none());
+    }
+
+    #[test]
+    fn all_version_request_accepts_flag_or_star() {
+        assert!(all_versions_requested(None, Some(true)));
+        assert!(all_versions_requested(Some("*"), None));
+        assert!(all_versions_requested(Some(" * "), Some(false)));
+        assert!(!all_versions_requested(Some("18"), Some(false)));
+        assert!(!all_versions_requested(None, None));
+    }
+
+    #[test]
+    fn all_version_profile_scan_skips_deferred_managed_local_without_starting() {
+        let mut config = test_config();
+        config.managed_local.enabled = true;
+        config.profiles.push(SandboxProfile {
+            name: "local-pg123456".to_string(),
+            admin_url: DEFERRED_LOCAL_ADMIN_URL.to_string(),
+            database_prefix: "pgsandbox".to_string(),
+            default_ttl_minutes: 240,
+            max_ttl_minutes: 1440,
+            allow_external_admin_url: false,
+            allowed_admin_hosts: Vec::new(),
+            max_active_databases_per_owner: None,
+            postgres_version: Some("123456".to_string()),
+            managed_local: true,
+        });
+        let manager = PostgresSandboxManager::new(config);
+
+        let profiles = manager.profiles_for_all_version_operations().unwrap();
+        let names = profiles
+            .iter()
+            .map(|profile| profile.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"default"));
+        assert!(!names.contains(&"local-pg123456"));
+    }
+
+    #[tokio::test]
+    async fn all_version_list_collects_profile_connection_failures() {
+        let mut config = test_config();
+        config.profiles[0].admin_url =
+            "postgres://postgres:secret@127.0.0.1:1/postgres?sslmode=disable".to_string();
+        let manager = PostgresSandboxManager::new(config);
+
+        let output = manager
+            .list_databases(ListDatabasesInput {
+                profile: None,
+                postgres_version: None,
+                include_all_versions: Some(true),
+                owner: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.scope, "allVersions");
+        assert!(output.databases.is_empty());
+        assert_eq!(output.failures.len(), 1);
+        assert_eq!(output.failures[0]["profile"], "default");
+        assert_eq!(output.failures[0]["category"], "profile_unavailable");
+        assert!(!output.failures[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn all_version_cleanup_collects_profile_connection_failures() {
+        let mut config = test_config();
+        config.profiles[0].admin_url =
+            "postgres://postgres:secret@127.0.0.1:1/postgres?sslmode=disable".to_string();
+        let manager = PostgresSandboxManager::new(config);
+
+        let output = manager
+            .cleanup_expired(CleanupExpiredInput {
+                profile: None,
+                postgres_version: None,
+                include_all_versions: Some(true),
+                dry_run: Some(true),
+            })
+            .await
+            .unwrap();
+
+        let failures = output.failures.unwrap();
+        assert_eq!(output.scope, "allVersions");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0]["profile"], "default");
+        assert_eq!(failures[0]["category"], "profile_unavailable");
+        assert!(!failures[0]["message"].as_str().unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn unscoped_database_id_is_cross_profile_lookup_candidate() {
+        assert!(selector_is_unscoped_database_id(
+            None,
+            None,
+            Some(&"db-id".to_string()),
+            None
+        ));
+        assert!(!selector_is_unscoped_database_id(
+            Some(&"local-pg18".to_string()),
+            None,
+            Some(&"db-id".to_string()),
+            None
+        ));
+        assert!(!selector_is_unscoped_database_id(
+            None,
+            Some(&"18".to_string()),
+            Some(&"db-id".to_string()),
+            None
+        ));
+        assert!(!selector_is_unscoped_database_id(
+            None,
+            None,
+            Some(&"db-id".to_string()),
+            Some(&"pgsandbox_name".to_string())
+        ));
+    }
+
+    #[test]
+    fn clone_downgrade_preflight_flags_newer_source() {
+        assert!(clone_downgrade_error("18", "16").is_some());
+        assert!(clone_downgrade_error("18", "18").is_none());
+        assert!(clone_downgrade_error("16", "18").is_none());
+        assert_eq!(postgres_major_from_server_version("18.4").unwrap(), "18");
+        assert_eq!(postgres_major_from_server_version("16").unwrap(), "16");
+    }
+
+    #[test]
+    fn workflow_errors_include_agent_branching_category() {
+        let template = workflow_error("template_not_found", "missing", None);
+        let command = workflow_error("migration_failed", "failed", None);
+        let validation = workflow_error("unsafe_migration_command", "unsafe", None);
+
+        assert_eq!(template.category, "template_not_found");
+        assert_eq!(command.category, "command_failed");
+        assert_eq!(validation.category, "validation");
     }
 
     #[test]
