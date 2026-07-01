@@ -5579,8 +5579,7 @@ fn readonly_violation_message(sql: &str, error: &anyhow::Error) -> Option<String
         .map(|keyword| keyword.to_ascii_uppercase())
         .unwrap_or_else(|| "SQL".to_string());
     Some(format!(
-        "readonly=true blocked {statement} statement; readonly=true runs SQL in a read-only transaction. Database detail: {}",
-        format!("{error:#}")
+        "readonly=true blocked {statement} statement; readonly=true runs SQL in a read-only transaction. Database detail: {error:#}"
     ))
 }
 
