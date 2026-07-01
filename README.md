@@ -268,6 +268,21 @@ Postgres; it selects an installed toolchain from `PATH`, common package-manager
 locations such as Homebrew `postgresql@18`, `PGSANDBOX_POSTGRES_BIN_DIR`, or
 `PGSANDBOX_POSTGRES_18_BIN_DIR`.
 
+Before requesting a version, call MCP `list_profiles` with
+`includeDiscoveredLocal: true` or run `pgsandbox-mcp doctor`. The response shows
+the binary version, exposed tool count, discovered local Postgres majors, and a
+restart reminder for MCP clients that cache tool metadata. On macOS, install
+the major versions you need with Homebrew, for example:
+
+```bash
+brew install postgresql@16 postgresql@17 postgresql@18
+```
+
+The Homebrew kegs can remain unlinked; PGSandbox discovers the `opt` bin
+directories. If a requested major is missing, install it, set
+`PGSANDBOX_POSTGRES_<MAJOR>_BIN_DIR`, or choose one of the versions listed by
+`list_profiles`.
+
 For an explicit external Postgres admin connection, set a single URL:
 
 ```bash
@@ -310,6 +325,16 @@ MCP tools can select profiles by `profile` or by `postgresVersion` when profile
 metadata is present. On the managed local default, requesting `postgresVersion`
 starts the corresponding `local-pg<major>` cluster on demand when matching
 binaries are installed.
+
+If an MCP client still has a stale explicit `PGSANDBOX_ADMIN_DATABASE_URL`,
+database tools return structured errors with a safe code, category, message,
+and remediation hint. Run `pgsandbox-mcp doctor` to see which config source is
+active. To switch a client back to managed local, rerun setup without
+`--admin-url` and restart the MCP client:
+
+```bash
+pgsandbox-mcp setup --client codex
+```
 
 Profiles default to local admin URLs only: `localhost`, `127.0.0.1`, `::1`, or
 a URL without a host. To use a private remote Postgres host, opt in explicitly
@@ -429,12 +454,30 @@ The local runtime stores its selected port, socket directory, data directory,
 log file, selected Postgres version, binary directory, and private admin URL in
 `~/.pgsandbox/local-postgres.json` or `~/.pgsandbox/local-postgres-<major>.json`.
 CLI output masks the password.
+On Unix, the socket directory is a short PGSandbox-owned path under
+`/tmp/pgsandbox-sockets/` so deeply nested `PGSANDBOX_HOME` values do not exceed
+Postgres Unix socket path limits.
+If you upgrade from a version that stored sockets under `~/.pgsandbox/` while a
+managed local cluster is already running, TCP connections continue to work. To
+move the running Unix socket to the short path immediately, run
+`pgsandbox-mcp local stop` and then `pgsandbox-mcp local start`.
 PGSandbox first uses PostgreSQL server binaries on `PATH`, then checks common
 Homebrew and Postgres.app install locations such as
 `/opt/homebrew/opt/postgresql@18/bin`. If an older MCP client config still
 contains `PGSANDBOX_ADMIN_DATABASE_URL`, rerun `pgsandbox-mcp setup --client
 <client>` without `--admin-url` to return that client to the managed local
 default.
+
+Managed-local clusters are intentionally long-lived once started so repeated
+agent tasks can create sandboxes quickly. They only host PGSandbox-owned
+metadata and sandbox databases. To stop clusters without touching unrelated
+Postgres services, use:
+
+```bash
+pgsandbox-mcp local status
+pgsandbox-mcp local stop
+pgsandbox-mcp local stop --postgres-version 18
+```
 
 The MCP server runs over stdio:
 

@@ -33,8 +33,12 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    config::{find_profile, find_profile_for_request, ConfigError, SandboxConfig, SandboxProfile},
+    config::{
+        find_profile, find_profile_for_request, ConfigError, SandboxConfig, SandboxProfile,
+        DEFERRED_LOCAL_ADMIN_URL,
+    },
     local::{discover_local_postgres_installations, LocalClusterConfig, LocalPostgresCluster},
+    mcp::PUBLIC_MCP_TOOL_COUNT,
     names::{make_sandbox_names, quote_ident, quote_literal},
 };
 
@@ -134,7 +138,7 @@ pub struct SchemaDiffInput {
     pub postgres_version: Option<String>,
     pub database_id: Option<String>,
     pub database_name: Option<String>,
-    pub base_digest: Value,
+    pub base_digest: SchemaDiffBaseDigest,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -292,6 +296,11 @@ pub struct ListDatabasesOutput {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListProfilesOutput {
+    pub server_version: String,
+    pub tool_count: usize,
+    pub restart_required_after_setup_note: String,
+    pub available_postgres_versions: Vec<String>,
+    pub hints: Vec<String>,
     pub profiles: Vec<ProfileSummary>,
 }
 
@@ -378,7 +387,7 @@ pub struct CleanupExpiredOutput {
     pub failures: Option<Vec<Value>>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaDigestOutput {
     pub database_id: String,
@@ -393,7 +402,7 @@ pub struct SchemaDigestOutput {
     pub extensions: Vec<SchemaDigestExtension>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaDigestTable {
     pub schema: String,
@@ -402,7 +411,7 @@ pub struct SchemaDigestTable {
     pub indexes: Vec<SchemaDigestIndex>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaDigestColumn {
     pub name: String,
@@ -410,18 +419,37 @@ pub struct SchemaDigestColumn {
     pub nullable: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaDigestIndex {
     pub name: String,
     pub definition_hash: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaDigestExtension {
     pub name: String,
     pub version: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum SchemaDiffBaseDigest {
+    Response(SchemaDigestOutput),
+    SerializedResponse(String),
+}
+
+impl SchemaDiffBaseDigest {
+    fn into_schema_digest(self) -> anyhow::Result<SchemaDigestOutput> {
+        match self {
+            Self::Response(digest) => Ok(digest),
+            Self::SerializedResponse(raw) => serde_json::from_str::<SchemaDigestOutput>(&raw)
+                .context(
+                    "baseDigest string must contain the full JSON schema_digest response, not only the checksum",
+                ),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -463,6 +491,8 @@ pub struct WorkflowEnvelope<T: Serialize> {
     pub detail_handles: Vec<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_sandbox: Option<T>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -652,7 +682,7 @@ pub struct CreateTemplateOutput {
     pub metadata: TemplateMetadata,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSandboxFromTemplateOutput {
     pub database_id: String,
@@ -794,11 +824,18 @@ impl PostgresSandboxManager {
         postgres_version: Option<&str>,
     ) -> anyhow::Result<SandboxProfile> {
         match find_profile_for_request(&self.config, profile_name, postgres_version) {
+            Ok(profile) if profile.managed_local => {
+                let version = postgres_version.or(profile.postgres_version.as_deref());
+                self.ensure_managed_local_profile(version)
+            }
             Ok(profile) => Ok(profile.clone()),
             Err(ConfigError::UnknownPostgresVersion(version))
                 if self.config.managed_local.enabled && profile_name.is_none() =>
             {
                 self.ensure_managed_local_profile(Some(&version))
+            }
+            Err(ConfigError::UnknownPostgresVersion(version)) => {
+                Err(unknown_postgres_version_error(&self.config, &version))
             }
             Err(ConfigError::UnknownProfile(profile))
                 if self.config.managed_local.enabled
@@ -820,7 +857,14 @@ impl PostgresSandboxManager {
     ) -> anyhow::Result<SandboxProfile> {
         let local_config = LocalPostgresCluster::from_env_for_version(postgres_version)?
             .ensure_started()
-            .context("failed to prepare requested local Postgres version")?;
+            .with_context(|| match postgres_version {
+                Some(version) => {
+                    format!(
+                        "failed to prepare local Postgres profile for postgresVersion {version}"
+                    )
+                }
+                None => "failed to prepare default local Postgres profile".to_string(),
+            })?;
         Ok(self.profile_from_local_config(local_config))
     }
 
@@ -858,13 +902,24 @@ impl PostgresSandboxManager {
                 default: profile.name == self.config.default_profile,
                 postgres_version: profile.postgres_version.clone(),
                 managed_local: profile.managed_local,
-                admin_url: mask_connection_string(&profile.admin_url),
+                admin_url: profile_admin_url_summary(profile),
                 source: "configured".to_string(),
             })
+            .collect::<Vec<_>>();
+        let mut available_postgres_versions = profiles
+            .iter()
+            .filter(|profile| profile.managed_local)
+            .filter_map(|profile| profile.postgres_version.clone())
             .collect::<Vec<_>>();
 
         if self.config.managed_local.enabled && input.include_discovered_local.unwrap_or(true) {
             for installation in discover_local_postgres_installations() {
+                if !available_postgres_versions
+                    .iter()
+                    .any(|version| version == &installation.postgres_version)
+                {
+                    available_postgres_versions.push(installation.postgres_version.clone());
+                }
                 if profiles.iter().any(|profile| {
                     profile.managed_local
                         && profile.postgres_version.as_deref()
@@ -883,8 +938,17 @@ impl PostgresSandboxManager {
                 });
             }
         }
+        available_postgres_versions.sort();
+        available_postgres_versions.dedup();
 
-        Ok(ListProfilesOutput { profiles })
+        Ok(ListProfilesOutput {
+            server_version: crate::VERSION.to_string(),
+            tool_count: PUBLIC_MCP_TOOL_COUNT,
+            restart_required_after_setup_note: restart_required_after_setup_note(),
+            available_postgres_versions,
+            hints: list_profile_hints(&self.config),
+            profiles,
+        })
     }
 
     async fn get_owned_record(
@@ -1281,7 +1345,10 @@ impl PostgresSandboxManager {
         let tables = client
             .query(
                 r#"
-                  SELECT table_schema, table_name
+                  SELECT table_schema,
+                         table_name,
+                         table_schema AS "tableSchema",
+                         table_name AS "tableName"
                   FROM information_schema.tables
                   WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
                   ORDER BY table_schema, table_name
@@ -1292,7 +1359,16 @@ impl PostgresSandboxManager {
         let columns = client
             .query(
                 r#"
-                  SELECT table_schema, table_name, column_name, data_type, is_nullable
+                  SELECT table_schema,
+                         table_name,
+                         column_name,
+                         data_type,
+                         is_nullable,
+                         table_schema AS "tableSchema",
+                         table_name AS "tableName",
+                         column_name AS "columnName",
+                         data_type AS "dataType",
+                         is_nullable AS "isNullable"
                   FROM information_schema.columns
                   WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
                   ORDER BY table_schema, table_name, ordinal_position
@@ -1303,7 +1379,14 @@ impl PostgresSandboxManager {
         let indexes = client
             .query(
                 r#"
-                  SELECT schemaname, tablename, indexname, indexdef
+                  SELECT schemaname,
+                         tablename,
+                         indexname,
+                         indexdef,
+                         schemaname AS "schemaName",
+                         tablename AS "tableName",
+                         indexname AS "indexName",
+                         indexdef AS "definition"
                   FROM pg_indexes
                   WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
                   ORDER BY schemaname, tablename, indexname
@@ -1313,7 +1396,14 @@ impl PostgresSandboxManager {
             .await?;
         let extensions = client
             .query(
-                "SELECT extname, extversion FROM pg_extension ORDER BY extname",
+                r#"
+                  SELECT extname,
+                         extversion,
+                         extname AS "name",
+                         extversion AS "version"
+                  FROM pg_extension
+                  ORDER BY extname
+                "#,
                 &[],
             )
             .await?;
@@ -1352,7 +1442,9 @@ impl PostgresSandboxManager {
     }
 
     pub async fn schema_diff(&self, input: SchemaDiffInput) -> anyhow::Result<SchemaDiffOutput> {
-        let before = serde_json::from_value::<SchemaDigestOutput>(input.base_digest)
+        let before = input
+            .base_digest
+            .into_schema_digest()
             .context("baseDigest must be a schema_digest response")?;
         let after = self
             .schema_digest(DatabaseSelector {
@@ -2121,7 +2213,16 @@ impl PostgresSandboxManager {
             };
         }
 
-        Ok(workflow_success(
+        let created_sandbox = CreateSandboxFromTemplateOutput {
+            database_id: created.database_id,
+            profile: created.profile,
+            database_name: created.database_name,
+            role_name: created.role_name,
+            expires_at: created.expires_at,
+            connection_string: created.connection_string,
+            template_name: template_name.clone(),
+        };
+        let mut envelope = workflow_success(
             format!(
                 "Sandbox created from template `{}`.",
                 metadata.template_name
@@ -2129,16 +2230,10 @@ impl PostgresSandboxManager {
             None,
             vec![metadata.privacy_warning.clone()],
             vec![template_detail_handle(&profile.name, &template_name)],
-            CreateSandboxFromTemplateOutput {
-                database_id: created.database_id,
-                profile: created.profile,
-                database_name: created.database_name,
-                role_name: created.role_name,
-                expires_at: created.expires_at,
-                connection_string: created.connection_string,
-                template_name,
-            },
-        ))
+            created_sandbox.clone(),
+        );
+        envelope.created_sandbox = Some(created_sandbox);
+        Ok(envelope)
     }
 
     pub async fn list_templates(
@@ -2309,6 +2404,52 @@ impl PostgresSandboxManager {
     }
 }
 
+fn unknown_postgres_version_error(config: &SandboxConfig, version: &str) -> anyhow::Error {
+    let default_profile = config
+        .profiles
+        .iter()
+        .find(|profile| profile.name == config.default_profile);
+    let profile_summary = default_profile
+        .map(|profile| {
+            format!(
+                "{} (managedLocal={}, postgresVersion={})",
+                profile.name,
+                profile.managed_local,
+                profile.postgres_version.as_deref().unwrap_or("unspecified")
+            )
+        })
+        .unwrap_or_else(|| config.default_profile.clone());
+
+    anyhow::anyhow!(
+        "No configured profile advertises postgresVersion {version}. The active default profile is {profile_summary}. To use managed local version discovery, rerun `pgsandbox-mcp setup --client <client>` without --admin-url, restart the MCP client, and retry. Or add an explicit profile with postgresVersion {version}."
+    )
+}
+
+fn list_profile_hints(config: &SandboxConfig) -> Vec<String> {
+    let mut hints = vec![restart_required_after_setup_note()];
+    if !config.managed_local.enabled {
+        hints.push(
+            "This server is using explicit configured Postgres profile(s), not managed local version discovery. If this was accidental or stale, rerun `pgsandbox-mcp setup --client <client>` without --admin-url and restart the MCP client.".to_string(),
+        );
+    }
+    hints
+}
+
+fn restart_required_after_setup_note() -> String {
+    format!(
+        "MCP clients cache tool metadata. After setup or upgrade, restart the MCP client and verify pgsandbox-mcp reports {} tools.",
+        PUBLIC_MCP_TOOL_COUNT
+    )
+}
+
+fn profile_admin_url_summary(profile: &SandboxProfile) -> String {
+    if profile.managed_local && profile.admin_url == DEFERRED_LOCAL_ADMIN_URL {
+        "(managed local; starts on demand)".to_string()
+    } else {
+        mask_connection_string(&profile.admin_url)
+    }
+}
+
 fn workflow_success<T: Serialize>(
     summary: impl Into<String>,
     changed_objects: Option<SchemaChangeCounts>,
@@ -2324,6 +2465,7 @@ fn workflow_success<T: Serialize>(
         errors: Vec::new(),
         detail_handles,
         result: Some(result),
+        created_sandbox: None,
     }
 }
 
@@ -2349,6 +2491,7 @@ fn workflow_failure_with_changes<T: Serialize>(
         errors: vec![error],
         detail_handles: Vec::new(),
         result,
+        created_sandbox: None,
     }
 }
 
@@ -3495,7 +3638,13 @@ async fn connect_admin(
     Client,
     tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
 )> {
-    connect_url(&profile.admin_url).await
+    connect_url(&profile.admin_url).await.with_context(|| {
+        format!(
+            "failed to connect to Postgres admin profile {} at {}",
+            profile.name,
+            mask_connection_string(&profile.admin_url)
+        )
+    })
 }
 
 pub(crate) async fn connect_url(
@@ -4841,17 +4990,34 @@ fn sandbox_record_from_row(row: &Row) -> SandboxRecord {
 }
 
 fn record_summary_to_json(row: &Row) -> Value {
+    let database_id = row.get::<_, String>("database_id");
+    let profile_name = row.get::<_, String>("profile_name");
+    let database_name = row.get::<_, String>("database_name");
+    let role_name = row.get::<_, String>("role_name");
+    let owner = row.get::<_, Option<String>>("owner");
+    let purpose = row.get::<_, Option<String>>("purpose");
+    let labels = row.get::<_, Value>("labels");
+    let created_at = row.get::<_, DateTime<Utc>>("created_at");
+    let expires_at = row.get::<_, DateTime<Utc>>("expires_at");
+    let deleted_at = row.get::<_, Option<DateTime<Utc>>>("deleted_at");
     json!({
-        "database_id": row.get::<_, String>("database_id"),
-        "profile_name": row.get::<_, String>("profile_name"),
-        "database_name": row.get::<_, String>("database_name"),
-        "role_name": row.get::<_, String>("role_name"),
-        "owner": row.get::<_, Option<String>>("owner"),
-        "purpose": row.get::<_, Option<String>>("purpose"),
-        "labels": row.get::<_, Value>("labels"),
-        "created_at": row.get::<_, DateTime<Utc>>("created_at"),
-        "expires_at": row.get::<_, DateTime<Utc>>("expires_at"),
-        "deleted_at": row.get::<_, Option<DateTime<Utc>>>("deleted_at"),
+        "databaseId": database_id,
+        "profile": profile_name,
+        "databaseName": database_name,
+        "roleName": role_name,
+        "owner": owner,
+        "purpose": purpose,
+        "labels": labels,
+        "createdAt": created_at,
+        "expiresAt": expires_at,
+        "deletedAt": deleted_at,
+        "database_id": database_id,
+        "profile_name": profile_name,
+        "database_name": database_name,
+        "role_name": role_name,
+        "created_at": created_at,
+        "expires_at": expires_at,
+        "deleted_at": deleted_at,
     })
 }
 
@@ -5162,6 +5328,27 @@ fn read_i64(raw: &[u8], offset: &mut usize) -> anyhow::Result<i64> {
 mod tests {
     use super::*;
 
+    fn test_config() -> SandboxConfig {
+        SandboxConfig {
+            default_profile: "default".to_string(),
+            profiles: vec![SandboxProfile {
+                name: "default".to_string(),
+                admin_url: "postgres://postgres:secret@localhost:5432/postgres?sslmode=disable"
+                    .to_string(),
+                database_prefix: "pgsandbox".to_string(),
+                default_ttl_minutes: 240,
+                max_ttl_minutes: 1440,
+                allow_external_admin_url: false,
+                allowed_admin_hosts: Vec::new(),
+                max_active_databases_per_owner: None,
+                postgres_version: None,
+                managed_local: false,
+            }],
+            telemetry: crate::config::TelemetryConfig { enabled: false },
+            managed_local: crate::config::ManagedLocalConfig { enabled: false },
+        }
+    }
+
     #[test]
     fn readonly_guard_rejects_transaction_control() {
         assert!(assert_safe_readonly_sql("select * from users").is_ok());
@@ -5287,6 +5474,73 @@ mod tests {
         let error = diff_schema_digests(&before, &after).unwrap_err();
 
         assert!(error.to_string().contains("schema digest versions differ"));
+    }
+
+    #[test]
+    fn schema_diff_base_digest_accepts_serialized_schema_digest_response() {
+        let digest = test_digest("base");
+        let raw = serde_json::to_string(&digest).unwrap();
+        let parsed = serde_json::from_value::<SchemaDiffBaseDigest>(json!(raw)).unwrap();
+
+        assert_eq!(parsed.into_schema_digest().unwrap(), digest);
+    }
+
+    #[test]
+    fn unknown_postgres_version_mentions_configured_profile_and_managed_local_repair() {
+        let manager = PostgresSandboxManager::new(test_config());
+        let error = manager.resolve_profile(None, Some("18")).unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("postgresVersion 18"));
+        assert!(message.contains("default"));
+        assert!(message.contains("setup --client"));
+        assert!(message.contains("without --admin-url"));
+    }
+
+    #[test]
+    fn list_profiles_reports_version_tool_count_and_restart_note() {
+        let manager = PostgresSandboxManager::new(test_config());
+        let output = manager
+            .list_profiles(ListProfilesInput {
+                include_discovered_local: Some(false),
+            })
+            .unwrap();
+
+        assert_eq!(output.server_version, crate::VERSION);
+        assert_eq!(output.tool_count, PUBLIC_MCP_TOOL_COUNT);
+        assert!(output
+            .restart_required_after_setup_note
+            .contains("After setup or upgrade"));
+        assert!(output
+            .hints
+            .iter()
+            .any(|hint| hint.contains("restart the MCP client")));
+        assert!(output
+            .hints
+            .iter()
+            .any(|hint| hint.contains("without --admin-url")));
+    }
+
+    #[test]
+    fn deferred_managed_local_profile_summary_does_not_show_placeholder_url() {
+        let mut config = test_config();
+        config.default_profile = "local".to_string();
+        config.managed_local.enabled = true;
+        config.profiles[0].name = "local".to_string();
+        config.profiles[0].managed_local = true;
+        config.profiles[0].admin_url = DEFERRED_LOCAL_ADMIN_URL.to_string();
+        let manager = PostgresSandboxManager::new(config);
+
+        let output = manager
+            .list_profiles(ListProfilesInput {
+                include_discovered_local: Some(false),
+            })
+            .unwrap();
+
+        assert_eq!(
+            output.profiles[0].admin_url,
+            "(managed local; starts on demand)"
+        );
     }
 
     #[test]
