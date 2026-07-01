@@ -577,11 +577,20 @@ fn resolve_postgres_binaries_for_config(
         .or_else(|| config.postgres_version.clone());
 
     let binaries = if let Some(bin_dir) = &config.postgres_bin_dir {
-        LocalPostgresBinaryCandidate::BinDir {
+        let saved_candidate = LocalPostgresBinaryCandidate::BinDir {
             label: format!("saved postgresBinDir {}", bin_dir.display()),
             path: bin_dir.clone(),
+        };
+        match saved_candidate.resolve() {
+            Ok(binaries) => binaries,
+            Err(saved_error) => resolve_postgres_binaries(expected_version.as_deref())
+                .with_context(|| {
+                    format!(
+                        "{} could not be used: {saved_error:#}",
+                        saved_candidate.label()
+                    )
+                })?,
         }
-        .resolve()?
     } else {
         resolve_postgres_binaries(expected_version.as_deref())?
     };
@@ -637,6 +646,10 @@ fn binary_candidates(requested_version: Option<&str>) -> Vec<LocalPostgresBinary
                 push_candidate_dir(&mut candidates, &mut seen_dirs, key, PathBuf::from(path));
             }
         }
+    }
+
+    for (key, path) in versioned_bin_dir_env_candidates() {
+        push_candidate_dir(&mut candidates, &mut seen_dirs, key, path);
     }
 
     if let Some(path) = env::var_os("PGSANDBOX_POSTGRES_BIN_DIR") {
@@ -787,6 +800,9 @@ pub fn discover_local_postgres_installations() -> Vec<LocalPostgresInstallation>
 fn discovery_binary_candidates() -> Vec<LocalPostgresBinaryCandidate> {
     let mut candidates = Vec::new();
     let mut seen_dirs = BTreeSet::new();
+    for (key, path) in versioned_bin_dir_env_candidates() {
+        push_candidate_dir(&mut candidates, &mut seen_dirs, key, path);
+    }
     if let Some(path) = env::var_os("PGSANDBOX_POSTGRES_BIN_DIR") {
         push_candidate_dir(
             &mut candidates,
@@ -804,19 +820,74 @@ fn discovery_binary_candidates() -> Vec<LocalPostgresBinaryCandidate> {
         );
     }
     candidates.push(LocalPostgresBinaryCandidate::PathCommands);
-    for version in 10..=25 {
-        for path in common_postgres_bin_dirs(&version.to_string()) {
-            if path.is_dir() {
-                push_candidate_dir(
-                    &mut candidates,
-                    &mut seen_dirs,
-                    format!("common bin dir {}", path.display()),
-                    path,
-                );
-            }
-        }
+    for path in discovered_common_postgres_bin_dirs() {
+        push_candidate_dir(
+            &mut candidates,
+            &mut seen_dirs,
+            format!("common bin dir {}", path.display()),
+            path,
+        );
     }
     candidates
+}
+
+fn versioned_bin_dir_env_candidates() -> Vec<(String, PathBuf)> {
+    let mut candidates = env::vars_os()
+        .filter_map(|(key, value)| {
+            let key = key.into_string().ok()?;
+            let version = key
+                .strip_prefix("PGSANDBOX_POSTGRES_")?
+                .strip_suffix("_BIN_DIR")?;
+            if normalize_postgres_version(version).ok()?.as_str() != version {
+                return None;
+            }
+            Some((key, PathBuf::from(value)))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    candidates
+}
+
+fn discovered_common_postgres_bin_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    push_child_bin_dirs(
+        &mut dirs,
+        &mut seen,
+        Path::new("/usr/lib/postgresql"),
+        |_| true,
+    );
+    push_child_bin_dirs(
+        &mut dirs,
+        &mut seen,
+        Path::new("/Applications/Postgres.app/Contents/Versions"),
+        |name| name != "latest",
+    );
+    push_child_bin_dirs(&mut dirs, &mut seen, Path::new("/opt/local/lib"), |name| {
+        name.starts_with("postgresql")
+    });
+
+    dirs
+}
+
+fn push_child_bin_dirs<F>(
+    dirs: &mut Vec<PathBuf>,
+    seen: &mut BTreeSet<PathBuf>,
+    root: &Path,
+    accept: F,
+) where
+    F: Fn(&str) -> bool,
+{
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if accept(&name) {
+            push_unique_dir(dirs, seen, entry.path().join("bin"));
+        }
+    }
 }
 
 pub(crate) fn select_free_port_with_probe<F>(mut available: F) -> Option<u16>
@@ -1219,8 +1290,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn postgres_binary_probe_skips_broken_candidate_directories() {
-        use std::{io::Write, os::unix::fs::PermissionsExt};
-
         let directory = tempfile::tempdir().unwrap();
         let broken = directory.path().join("broken");
         let working = directory.path().join("working");
@@ -1235,14 +1304,47 @@ mod tests {
         let resolved = probe_local_postgres_bin_dir(vec![broken, working.clone()]).unwrap();
 
         assert_eq!(resolved, working);
+    }
 
-        fn write_executable(path: &Path, content: &str) {
-            let mut file = fs::File::create(path).unwrap();
-            file.write_all(content.as_bytes()).unwrap();
-            let mut permissions = fs::metadata(path).unwrap().permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(path, permissions).unwrap();
+    #[cfg(unix)]
+    #[test]
+    fn saved_bin_dir_falls_back_to_matching_discovered_binaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let stale = directory.path().join("stale");
+        let working = directory.path().join("working");
+        fs::create_dir_all(&stale).unwrap();
+        fs::create_dir_all(&working).unwrap();
+
+        for binary in required_local_binaries() {
+            write_executable(
+                &working.join(binary),
+                "#!/bin/sh\necho 'postgres (PostgreSQL) 99.1'\nexit 0\n",
+            );
         }
+
+        let key = "PGSANDBOX_POSTGRES_99_BIN_DIR";
+        let previous = env::var_os(key);
+        env::set_var(key, &working);
+        let config = LocalClusterConfig {
+            profile_name: "local-pg99".to_string(),
+            postgres_version: Some("99".to_string()),
+            postgres_bin_dir: Some(stale),
+            admin_url: admin_url_for(65432, "secret"),
+            host: "127.0.0.1".to_string(),
+            port: 65432,
+            data_dir: directory.path().join("data"),
+            socket_dir: directory.path().join("run"),
+            log_file: directory.path().join("postgres.log"),
+        };
+
+        let binaries = resolve_postgres_binaries_for_config(&config, Some("99")).unwrap();
+
+        match previous {
+            Some(value) => env::set_var(key, value),
+            None => env::remove_var(key),
+        }
+        assert_eq!(binaries.bin_dir.as_deref(), Some(working.as_path()));
+        assert_eq!(binaries.version, "99");
     }
 
     #[test]
@@ -1300,6 +1402,24 @@ mod tests {
             versioned_bin_dir_env_key("16.4").unwrap(),
             "PGSANDBOX_POSTGRES_16_BIN_DIR"
         );
+    }
+
+    #[test]
+    fn discovery_includes_versioned_bin_dir_env_vars() {
+        let directory = tempfile::tempdir().unwrap();
+        let key = "PGSANDBOX_POSTGRES_99_BIN_DIR";
+        let previous = env::var_os(key);
+        env::set_var(key, directory.path());
+
+        let candidates = versioned_bin_dir_env_candidates();
+
+        match previous {
+            Some(value) => env::set_var(key, value),
+            None => env::remove_var(key),
+        }
+        assert!(candidates
+            .iter()
+            .any(|(candidate_key, path)| candidate_key == key && path == directory.path()));
     }
 
     #[cfg(unix)]
@@ -1434,5 +1554,16 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp"))
             .count();
         assert_eq!(leftovers, 0);
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, content: &str) {
+        use std::{io::Write, os::unix::fs::PermissionsExt};
+
+        let mut file = fs::File::create(path).unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
     }
 }

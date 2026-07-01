@@ -132,11 +132,7 @@ where
     V: Into<String>,
 {
     load_config_from_env_with_local(vars, |postgres_version| {
-        let config = LocalPostgresCluster::from_env()
-            .and_then(|cluster| match postgres_version {
-                Some(version) => LocalPostgresCluster::from_env_for_version(Some(version)),
-                None => Ok(cluster),
-            })
+        let config = LocalPostgresCluster::from_env_for_version(postgres_version)
             .map_err(|error| ConfigError::LocalPostgres(error.to_string()))?
             .ensure_started()
             .map_err(|error| ConfigError::LocalPostgres(error.to_string()))?;

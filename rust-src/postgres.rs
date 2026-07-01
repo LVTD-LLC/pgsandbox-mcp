@@ -2680,7 +2680,7 @@ fn infer_repo_postgres_version(
         if path.is_file() {
             let raw = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
-            let value = serde_yaml::from_str::<serde_yaml::Value>(&raw)
+            let value = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&raw)
                 .with_context(|| format!("failed to parse {}", path.display()))?;
             if let Some(inference) = find_postgres_version_in_yaml(&value, file_name, Vec::new()) {
                 return Ok(Some(inference));
@@ -2738,12 +2738,12 @@ fn resolve_repo_postgres_version(
 }
 
 fn find_postgres_version_in_yaml(
-    value: &serde_yaml::Value,
+    value: &serde_yaml_ng::Value,
     file_name: &str,
     path: Vec<String>,
 ) -> Option<RepoPostgresVersionInference> {
     match value {
-        serde_yaml::Value::Mapping(mapping) => {
+        serde_yaml_ng::Value::Mapping(mapping) => {
             for (key, child) in mapping {
                 let Some(key) = key.as_str() else {
                     continue;
@@ -2767,7 +2767,7 @@ fn find_postgres_version_in_yaml(
             }
             None
         }
-        serde_yaml::Value::Sequence(items) => {
+        serde_yaml_ng::Value::Sequence(items) => {
             for (index, child) in items.iter().enumerate() {
                 let mut child_path = path.clone();
                 child_path.push(index.to_string());
@@ -2826,14 +2826,49 @@ fn find_postgres_version_in_json(
 
 fn postgres_version_from_image(image: &str) -> Option<String> {
     let image = image.trim().to_ascii_lowercase();
-    if !(image.contains("postgres") || image.contains("postgis") || image.contains("timescaledb")) {
+    let (name, tag) = docker_image_name_and_tag(&image)?;
+    if !is_postgres_image_name(name) {
         return None;
     }
-    let tag = image.rsplit_once(':')?.1;
-    leading_digits(tag).or_else(|| {
-        tag.split(['-', '_', '.'])
-            .find_map(|part| part.strip_prefix("pg").and_then(leading_digits))
-    })
+    postgres_major_from_tag(tag)
+}
+
+fn docker_image_name_and_tag(image: &str) -> Option<(&str, &str)> {
+    let image = image.split_once('@').map_or(image, |(image, _)| image);
+    let tag_separator = image.rfind(':')?;
+    let last_slash = image.rfind('/');
+    if last_slash.is_some_and(|slash| tag_separator < slash) {
+        return None;
+    }
+    let name = &image[..tag_separator];
+    let tag = &image[tag_separator + 1..];
+    (!name.is_empty() && !tag.is_empty()).then_some((name, tag))
+}
+
+fn is_postgres_image_name(name: &str) -> bool {
+    let mut parts = name.split('/').collect::<Vec<_>>();
+    if parts.len() > 1
+        && parts
+            .first()
+            .is_some_and(|part| part.contains('.') || part.contains(':') || *part == "localhost")
+    {
+        parts.remove(0);
+    }
+    let repository = parts.join("/");
+    matches!(
+        repository.as_str(),
+        "postgres"
+            | "library/postgres"
+            | "postgis/postgis"
+            | "timescale/timescaledb"
+            | "timescaledb/timescaledb"
+    )
+}
+
+fn postgres_major_from_tag(tag: &str) -> Option<String> {
+    tag.split(['-', '_', '.'])
+        .find_map(|part| part.strip_prefix("pg").and_then(leading_digits))
+        .or_else(|| leading_digits(tag))
 }
 
 fn leading_digits(value: &str) -> Option<String> {
@@ -5558,6 +5593,51 @@ services:
 
         assert_eq!(inference.version, "17");
         assert_eq!(inference.source, "compose.yaml services.db.image");
+    }
+
+    #[test]
+    fn infers_postgres_version_from_timescale_pg_tag() {
+        let directory = tempfile::tempdir().unwrap();
+        let repo = directory.path();
+        std::fs::write(
+            repo.join("compose.yaml"),
+            r#"
+services:
+  db:
+    image: timescaledb/timescaledb:2.11.2-pg16
+"#,
+        )
+        .unwrap();
+
+        let inference = infer_repo_postgres_version(repo).unwrap().unwrap();
+
+        assert_eq!(inference.version, "16");
+        assert_eq!(inference.source, "compose.yaml services.db.image");
+    }
+
+    #[test]
+    fn ignores_non_postgres_images_with_postgres_substrings() {
+        let directory = tempfile::tempdir().unwrap();
+        let repo = directory.path();
+        std::fs::write(
+            repo.join("compose.yaml"),
+            r#"
+services:
+  api:
+    image: postgrest/postgrest:10.1
+  exporter:
+    image: prometheuscommunity/postgres-exporter:v0.14.0
+  db:
+    image: postgres:16
+"#,
+        )
+        .unwrap();
+
+        let inference = infer_repo_postgres_version(repo).unwrap().unwrap();
+
+        assert_eq!(inference.version, "16");
+        assert_eq!(inference.source, "compose.yaml services.db.image");
+        assert!(postgres_version_from_image("postgres-exporter:0.14").is_none());
     }
 
     #[test]
