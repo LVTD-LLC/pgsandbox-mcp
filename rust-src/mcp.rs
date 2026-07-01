@@ -520,6 +520,16 @@ impl PgsandboxServer {
                 "hasPostgresVersion",
                 json!(input.postgres_version.is_some()),
             ),
+            (
+                "includeAllVersions",
+                json!(
+                    input.include_all_versions.unwrap_or(false)
+                        || input
+                            .postgres_version
+                            .as_deref()
+                            .is_some_and(|version| version.trim() == "*")
+                ),
+            ),
             ("hasOwnerFilter", json!(input.owner.is_some())),
         ]);
         self.tracked_tool(
@@ -540,6 +550,16 @@ impl PgsandboxServer {
             (
                 "hasPostgresVersion",
                 json!(input.postgres_version.is_some()),
+            ),
+            (
+                "includeAllVersions",
+                json!(
+                    input.include_all_versions.unwrap_or(false)
+                        || input
+                            .postgres_version
+                            .as_deref()
+                            .is_some_and(|version| version.trim() == "*")
+                ),
             ),
             ("dryRun", json!(input.dry_run.unwrap_or(false))),
         ]);
@@ -609,6 +629,12 @@ struct ToolErrorBody {
     category: &'static str,
     message: String,
     hint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requested_version: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    detected_versions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail_handle: Option<Value>,
 }
 
 impl ToolErrorResponse {
@@ -623,25 +649,108 @@ impl ToolErrorResponse {
                 category: "postgres",
                 message: chain,
                 hint: "Run `pgsandbox-mcp doctor` to identify the active config source. If an MCP client config has a stale explicit PGSANDBOX_ADMIN_DATABASE_URL, run `pgsandbox-mcp setup --client <client>` without --admin-url, restart the MCP client, and retry.".to_string(),
+                requested_version: None,
+                detected_versions: Vec::new(),
+                detail_handle: None,
+            }
+        } else if lower.contains("duplicate key value violates unique constraint") {
+            ToolErrorBody {
+                code: "constraint_violation",
+                category: "constraint_violation",
+                message: chain,
+                hint: "The SQL violated a database constraint. Inspect the constraint name and adjust the input or query before retrying.".to_string(),
+                requested_version: None,
+                detected_versions: Vec::new(),
+                detail_handle: None,
+            }
+        } else if lower.contains("read-only transaction")
+            || lower.contains("readonly sql cannot include")
+        {
+            ToolErrorBody {
+                code: "readonly_violation",
+                category: "readonly_violation",
+                message: chain,
+                hint: "The request attempted a write or session change through a readonly path. Retry with readonly=false only if mutation is intended.".to_string(),
+                requested_version: None,
+                detected_versions: Vec::new(),
+                detail_handle: None,
+            }
+        } else if lower.contains("database was not found in pgsandbox metadata") {
+            ToolErrorBody {
+                code: "database_not_found",
+                category: "database_not_found",
+                message: chain,
+                hint: "Retry with the sandbox's profile or postgresVersion, or call list_databases with includeAllVersions=true to discover active sandboxes across versions.".to_string(),
+                requested_version: None,
+                detected_versions: Vec::new(),
+                detail_handle: None,
+            }
+        } else if lower.contains("does not match requested postgresversion") {
+            ToolErrorBody {
+                code: "version_mismatch",
+                category: "version_mismatch",
+                message: chain.clone(),
+                hint: "When selecting by postgresVersion, omit profile unless intentionally targeting an exact versioned profile. Use list_profiles to inspect profile/version pairs.".to_string(),
+                requested_version: requested_version_from_message(&chain),
+                detected_versions: detected_postgres_versions(),
+                detail_handle: Some(json!({
+                    "type": "diagnostic",
+                    "tool": "list_profiles"
+                })),
+            }
+        } else if lower.contains("restore_incompatible") {
+            ToolErrorBody {
+                code: "restore_incompatible",
+                category: "restore_incompatible",
+                message: chain.clone(),
+                hint: "Clone into the same or newer target Postgres major version, or create a dump that is compatible with the older target.".to_string(),
+                requested_version: requested_version_from_message(&chain),
+                detected_versions: detected_postgres_versions(),
+                detail_handle: Some(json!({
+                    "type": "diagnostic",
+                    "tool": "list_profiles"
+                })),
             }
         } else if lower.contains("could not find local postgres")
             || lower.contains("failed to prepare local postgres profile")
             || lower.contains("failed to prepare default local postgres profile")
         {
+            let requested_version = requested_version_from_message(&chain);
             ToolErrorBody {
                 code: "local_postgres_unavailable",
                 category: "local_postgres",
-                message: chain,
+                message: requested_version
+                    .as_ref()
+                    .map(|version| format!("Local Postgres {version} binaries are unavailable."))
+                    .unwrap_or_else(|| "Local Postgres binaries are unavailable.".to_string()),
                 hint: "Install local PostgreSQL server binaries for the requested major version, set PGSANDBOX_POSTGRES_BIN_DIR or PGSANDBOX_POSTGRES_<MAJOR>_BIN_DIR, or choose a version shown by list_profiles.".to_string(),
+                requested_version,
+                detected_versions: detected_postgres_versions(),
+                detail_handle: Some(json!({
+                    "type": "diagnostic",
+                    "command": "pgsandbox-mcp doctor"
+                })),
             }
         } else if lower.contains("no configured profile advertises postgresversion")
             || lower.contains("unknown postgres version")
         {
+            let requested_version = requested_version_from_message(&chain);
             ToolErrorBody {
                 code: "postgres_version_unavailable",
                 category: "config",
-                message: chain,
+                message: requested_version
+                    .as_ref()
+                    .map(|version| {
+                        format!("No configured profile advertises postgresVersion {version}.")
+                    })
+                    .unwrap_or(chain),
                 hint: "Use a postgresVersion listed by list_profiles, add a matching explicit profile, or rerun setup without --admin-url to use managed local version discovery.".to_string(),
+                requested_version,
+                detected_versions: detected_postgres_versions(),
+                detail_handle: Some(json!({
+                    "type": "diagnostic",
+                    "tool": "list_profiles"
+                })),
             }
         } else if lower.contains("connection refused")
             || lower.contains("connection timed out")
@@ -652,6 +761,9 @@ impl ToolErrorResponse {
                 category: "postgres",
                 message: chain,
                 hint: "Run `pgsandbox-mcp doctor` to verify the configured profile and connectivity. For managed local, try `pgsandbox-mcp local status` or `pgsandbox-mcp local start`.".to_string(),
+                requested_version: None,
+                detected_versions: Vec::new(),
+                detail_handle: None,
             }
         } else {
             ToolErrorBody {
@@ -659,6 +771,9 @@ impl ToolErrorResponse {
                 category: "unknown",
                 message: chain,
                 hint: "Run `pgsandbox-mcp doctor` for a local diagnostic, then retry the tool with the same profile or postgresVersion.".to_string(),
+                requested_version: None,
+                detected_versions: Vec::new(),
+                detail_handle: None,
             }
         };
 
@@ -667,6 +782,35 @@ impl ToolErrorResponse {
             error: body,
         }
     }
+}
+
+fn detected_postgres_versions() -> Vec<String> {
+    let mut versions = crate::local::discover_local_postgres_installations()
+        .into_iter()
+        .map(|installation| installation.postgres_version)
+        .collect::<Vec<_>>();
+    versions.sort();
+    versions.dedup();
+    versions
+}
+
+fn requested_version_from_message(message: &str) -> Option<String> {
+    requested_version_after(message, "requested postgresVersion")
+        .or_else(|| requested_version_after(message, "postgresVersion"))
+        .or_else(|| requested_version_after(message, "Local Postgres"))
+        .or_else(|| requested_version_after(message, "local Postgres"))
+}
+
+fn requested_version_after(message: &str, marker: &str) -> Option<String> {
+    let start = message.find(marker)? + marker.len();
+    let version = message[start..]
+        .trim_start_matches(|character: char| {
+            character.is_whitespace() || matches!(character, ':' | '=' | '"' | '`')
+        })
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect::<String>();
+    (!version.is_empty()).then_some(version)
 }
 
 fn sanitize_error_message(message: &str) -> String {
@@ -734,6 +878,66 @@ mod tests {
             .unwrap()
             .contains("pgsandbox-mcp doctor"));
         assert!(!text.contains("postgres:postgres@"));
+    }
+
+    #[test]
+    fn tool_errors_use_specific_agent_categories() {
+        let cases = [
+            (
+                "db error: ERROR: duplicate key value violates unique constraint \"users_email_key\"",
+                "constraint_violation",
+                "constraint_violation",
+            ),
+            (
+                "db error: ERROR: cannot execute INSERT in a read-only transaction",
+                "readonly_violation",
+                "readonly_violation",
+            ),
+            (
+                "Database was not found in PGSandbox metadata.",
+                "database_not_found",
+                "database_not_found",
+            ),
+            (
+                "profile local postgresVersion 18 does not match requested postgresVersion 16",
+                "version_mismatch",
+                "version_mismatch",
+            ),
+            (
+                "restore_incompatible: cannot clone from Postgres 18 into older target Postgres 16",
+                "restore_incompatible",
+                "restore_incompatible",
+            ),
+        ];
+
+        for (message, code, category) in cases {
+            let result = tool_json::<()>(Err(anyhow::anyhow!(message))).unwrap();
+            let text = result.content[0].as_text().unwrap().text.clone();
+            let value = serde_json::from_str::<Value>(&text).unwrap();
+
+            assert_eq!(value["error"]["code"], code);
+            assert_eq!(value["error"]["category"], category);
+        }
+    }
+
+    #[test]
+    fn unavailable_version_errors_are_compact_and_structured() {
+        let result = tool_json::<()>(Err(anyhow::anyhow!(
+            "failed to prepare local Postgres profile for postgresVersion 15: could not find local Postgres 15 binaries. Tried: /very/long/path/bin/initdb failed; /another/path/pg_ctl failed"
+        )))
+        .unwrap();
+        let text = result.content[0].as_text().unwrap().text.clone();
+        let value = serde_json::from_str::<Value>(&text).unwrap();
+
+        assert_eq!(value["error"]["code"], "local_postgres_unavailable");
+        assert_eq!(value["error"]["requestedVersion"], "15");
+        assert_eq!(
+            value["error"]["message"],
+            "Local Postgres 15 binaries are unavailable."
+        );
+        assert!(value["error"]["detectedVersions"].is_array());
+        assert!(value["error"]["detailHandle"].is_object());
+        assert!(!text.contains("/very/long/path"));
     }
 
     #[test]
