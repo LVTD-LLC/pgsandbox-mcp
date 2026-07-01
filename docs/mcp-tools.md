@@ -31,9 +31,10 @@ object with `ok: false`, `error.code`, `error.category`, `error.message`, and
 failure classes use stable categories such as `constraint_violation`,
 `readonly_violation`, `database_not_found`, `version_mismatch`,
 `restore_incompatible`, and `template_not_found`. Version diagnostics may also
-include `requestedVersion`, `detectedVersions`, and a `detailHandle` pointing to
-`list_profiles` or `pgsandbox-mcp doctor` instead of embedding long local path
-traces. Typical codes include `postgres_auth_failed`,
+include `requestedVersion`, `sourceVersion`, `targetVersion`,
+`detectedVersions`, and a `detailHandle` pointing to `list_profiles` or
+`pgsandbox-mcp doctor` instead of embedding long local path traces. Typical
+codes include `postgres_auth_failed`,
 `postgres_connection_failed`, `postgres_version_unavailable`, and
 `local_postgres_unavailable`.
 
@@ -81,10 +82,9 @@ Returns:
 - `availablePostgresVersions`
 - `hints`
 - `profiles`: profile summaries with `name`, `postgresVersion`, `managedLocal`,
-  `serverVersion`, `port`, masked `adminUrl`, and `source`. `port` is present
-  when the profile has a concrete admin URL; discoverable local versions that
-  have not been started yet report `adminUrl: "(managed local; starts on
-  demand)"`.
+  `port`, masked `adminUrl`, and `source`. `port` is present when the profile
+  has a concrete admin URL; discoverable local versions that have not been
+  started yet report `adminUrl: "(managed local; starts on demand)"`.
 
 Use `includeDiscoveredLocal: true` before requesting a `postgresVersion`. The
 server does not download Postgres; the requested major must be installed locally
@@ -455,9 +455,10 @@ Inputs:
 
 - `profile`: optional Postgres profile name
 - `postgresVersion`: optional Postgres major version. Use `"*"` to list across
-  configured and discoverable managed-local version profiles.
-- `includeAllVersions`: optional boolean. When true, lists across configured and
-  discoverable managed-local version profiles. Do not combine with `profile`.
+  configured profiles and running managed-local version profiles.
+- `includeAllVersions`: optional boolean. When true, lists across configured
+  profiles and running managed-local version profiles. Do not combine with
+  `profile`.
 - `owner`: optional owner filter
 
 Returns:
@@ -478,9 +479,9 @@ Inputs:
 
 - `profile`: optional Postgres profile name
 - `postgresVersion`: optional Postgres major version. Use `"*"` to clean up
-  across configured and discoverable managed-local version profiles.
+  across configured profiles and running managed-local version profiles.
 - `includeAllVersions`: optional boolean. When true, cleans up across configured
-  and discoverable managed-local version profiles. Do not combine with
+  profiles and running managed-local version profiles. Do not combine with
   `profile`.
 - `dryRun`: optional boolean
 
@@ -498,7 +499,7 @@ Returns:
 ## Stable Agent Contract
 
 `databaseId` is globally resolvable by database-id-only calls when the server can
-search the configured and discoverable managed-local profiles. If a profile
+search configured profiles and running managed-local profiles. If a profile
 cannot be searched or the id is not found, the error uses
 `category: "database_not_found"` and tells the caller to retry with
 `profile`/`postgresVersion` or call `list_databases` with
@@ -515,4 +516,4 @@ profile selection.
 Clone downgrades are not supported by default. PGSandbox checks the source and
 target Postgres majors before creating the target sandbox and returns
 `category: "restore_incompatible"` when the source major is newer than the
-target.
+target. The error includes `sourceVersion` and `targetVersion`.

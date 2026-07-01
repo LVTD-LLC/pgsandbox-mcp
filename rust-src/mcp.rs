@@ -631,6 +631,10 @@ struct ToolErrorBody {
     hint: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     requested_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_version: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     detected_versions: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -650,6 +654,8 @@ impl ToolErrorResponse {
                 message: chain,
                 hint: "Run `pgsandbox-mcp doctor` to identify the active config source. If an MCP client config has a stale explicit PGSANDBOX_ADMIN_DATABASE_URL, run `pgsandbox-mcp setup --client <client>` without --admin-url, restart the MCP client, and retry.".to_string(),
                 requested_version: None,
+                source_version: None,
+                target_version: None,
                 detected_versions: Vec::new(),
                 detail_handle: None,
             }
@@ -660,6 +666,8 @@ impl ToolErrorResponse {
                 message: chain,
                 hint: "The SQL violated a database constraint. Inspect the constraint name and adjust the input or query before retrying.".to_string(),
                 requested_version: None,
+                source_version: None,
+                target_version: None,
                 detected_versions: Vec::new(),
                 detail_handle: None,
             }
@@ -672,6 +680,8 @@ impl ToolErrorResponse {
                 message: chain,
                 hint: "The request attempted a write or session change through a readonly path. Retry with readonly=false only if mutation is intended.".to_string(),
                 requested_version: None,
+                source_version: None,
+                target_version: None,
                 detected_versions: Vec::new(),
                 detail_handle: None,
             }
@@ -682,6 +692,8 @@ impl ToolErrorResponse {
                 message: chain,
                 hint: "Retry with the sandbox's profile or postgresVersion, or call list_databases with includeAllVersions=true to discover active sandboxes across versions.".to_string(),
                 requested_version: None,
+                source_version: None,
+                target_version: None,
                 detected_versions: Vec::new(),
                 detail_handle: None,
             }
@@ -692,6 +704,8 @@ impl ToolErrorResponse {
                 message: chain.clone(),
                 hint: "When selecting by postgresVersion, omit profile unless intentionally targeting an exact versioned profile. Use list_profiles to inspect profile/version pairs.".to_string(),
                 requested_version: requested_version_from_message(&chain),
+                source_version: None,
+                target_version: None,
                 detected_versions: detected_postgres_versions(),
                 detail_handle: Some(json!({
                     "type": "diagnostic",
@@ -699,12 +713,18 @@ impl ToolErrorResponse {
                 })),
             }
         } else if lower.contains("restore_incompatible") {
+            let (source_version, target_version) =
+                restore_incompatible_versions_from_message(&chain);
             ToolErrorBody {
                 code: "restore_incompatible",
                 category: "restore_incompatible",
                 message: chain.clone(),
                 hint: "Clone into the same or newer target Postgres major version, or create a dump that is compatible with the older target.".to_string(),
-                requested_version: requested_version_from_message(&chain),
+                requested_version: target_version
+                    .clone()
+                    .or_else(|| requested_version_from_message(&chain)),
+                source_version,
+                target_version,
                 detected_versions: detected_postgres_versions(),
                 detail_handle: Some(json!({
                     "type": "diagnostic",
@@ -725,6 +745,8 @@ impl ToolErrorResponse {
                     .unwrap_or_else(|| "Local Postgres binaries are unavailable.".to_string()),
                 hint: "Install local PostgreSQL server binaries for the requested major version, set PGSANDBOX_POSTGRES_BIN_DIR or PGSANDBOX_POSTGRES_<MAJOR>_BIN_DIR, or choose a version shown by list_profiles.".to_string(),
                 requested_version,
+                source_version: None,
+                target_version: None,
                 detected_versions: detected_postgres_versions(),
                 detail_handle: Some(json!({
                     "type": "diagnostic",
@@ -746,6 +768,8 @@ impl ToolErrorResponse {
                     .unwrap_or(chain),
                 hint: "Use a postgresVersion listed by list_profiles, add a matching explicit profile, or rerun setup without --admin-url to use managed local version discovery.".to_string(),
                 requested_version,
+                source_version: None,
+                target_version: None,
                 detected_versions: detected_postgres_versions(),
                 detail_handle: Some(json!({
                     "type": "diagnostic",
@@ -762,6 +786,8 @@ impl ToolErrorResponse {
                 message: chain,
                 hint: "Run `pgsandbox-mcp doctor` to verify the configured profile and connectivity. For managed local, try `pgsandbox-mcp local status` or `pgsandbox-mcp local start`.".to_string(),
                 requested_version: None,
+                source_version: None,
+                target_version: None,
                 detected_versions: Vec::new(),
                 detail_handle: None,
             }
@@ -772,6 +798,8 @@ impl ToolErrorResponse {
                 message: chain,
                 hint: "Run `pgsandbox-mcp doctor` for a local diagnostic, then retry the tool with the same profile or postgresVersion.".to_string(),
                 requested_version: None,
+                source_version: None,
+                target_version: None,
                 detected_versions: Vec::new(),
                 detail_handle: None,
             }
@@ -799,6 +827,13 @@ fn requested_version_from_message(message: &str) -> Option<String> {
         .or_else(|| requested_version_after(message, "postgresVersion"))
         .or_else(|| requested_version_after(message, "Local Postgres"))
         .or_else(|| requested_version_after(message, "local Postgres"))
+}
+
+fn restore_incompatible_versions_from_message(message: &str) -> (Option<String>, Option<String>) {
+    (
+        requested_version_after(message, "from Postgres"),
+        requested_version_after(message, "target Postgres"),
+    )
 }
 
 fn requested_version_after(message: &str, marker: &str) -> Option<String> {
@@ -938,6 +973,21 @@ mod tests {
         assert!(value["error"]["detectedVersions"].is_array());
         assert!(value["error"]["detailHandle"].is_object());
         assert!(!text.contains("/very/long/path"));
+    }
+
+    #[test]
+    fn restore_incompatible_errors_include_source_and_target_versions() {
+        let result = tool_json::<()>(Err(anyhow::anyhow!(
+            "restore_incompatible: cannot clone from Postgres 18 into older target Postgres 16"
+        )))
+        .unwrap();
+        let text = result.content[0].as_text().unwrap().text.clone();
+        let value = serde_json::from_str::<Value>(&text).unwrap();
+
+        assert_eq!(value["error"]["code"], "restore_incompatible");
+        assert_eq!(value["error"]["requestedVersion"], "16");
+        assert_eq!(value["error"]["sourceVersion"], "18");
+        assert_eq!(value["error"]["targetVersion"], "16");
     }
 
     #[test]

@@ -334,9 +334,9 @@ profile; mismatches return a structured `version_mismatch` error. Major-only
 version strings such as `"16"`, `"17"`, and `"18"` are canonical, and patch
 strings are normalized to the major.
 
-Sandbox `databaseId` lookup works across configured and discoverable local
-profiles when the call provides only `databaseId`. If a database id cannot be
-resolved, the error tells the caller to retry with `profile` or
+Sandbox `databaseId` lookup works across configured profiles and running
+managed-local profiles when the call provides only `databaseId`. If a database
+id cannot be resolved, the error tells the caller to retry with `profile` or
 `postgresVersion`, or to inspect active sandboxes with `list_databases` and
 `includeAllVersions: true`.
 
@@ -455,10 +455,11 @@ credentials through environment variables, not permanent settings rewrites.
 
 By default, `list_databases` and `cleanup_expired` are scoped to the selected
 profile. Pass `includeAllVersions: true` or `postgresVersion: "*"` for an
-explicit cross-version listing or cleanup. Clone requests preflight source and
-target Postgres majors before creating the target sandbox; newer-to-older clone
-paths fail with `restore_incompatible` instead of creating a sandbox and then
-failing during restore.
+explicit cross-version listing or cleanup across configured profiles and running
+managed-local versions. Clone requests preflight source and target Postgres
+majors before creating the target sandbox; newer-to-older clone paths fail with
+`restore_incompatible` and include `sourceVersion` and `targetVersion` instead
+of creating a sandbox and then failing during restore.
 
 ## Local Shape
 

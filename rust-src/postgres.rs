@@ -314,7 +314,6 @@ pub struct ProfileSummary {
     pub name: String,
     pub default: bool,
     pub postgres_version: Option<String>,
-    pub server_version: Option<String>,
     pub port: Option<u16>,
     pub managed_local: bool,
     pub admin_url: String,
@@ -912,7 +911,6 @@ impl PostgresSandboxManager {
                 name: profile.name.clone(),
                 default: profile.name == self.config.default_profile,
                 postgres_version: profile.postgres_version.clone(),
-                server_version: profile.postgres_version.clone(),
                 port: profile_admin_url_port(profile),
                 managed_local: profile.managed_local,
                 admin_url: profile_admin_url_summary(profile),
@@ -945,7 +943,6 @@ impl PostgresSandboxManager {
                     name,
                     default: false,
                     postgres_version: Some(installation.postgres_version.clone()),
-                    server_version: Some(installation.postgres_version),
                     port: None,
                     managed_local: true,
                     admin_url: "(managed local; starts on demand)".to_string(),
@@ -1363,7 +1360,7 @@ impl PostgresSandboxManager {
         ) {
             if input.profile.is_some() {
                 anyhow::bail!(
-                    "includeAllVersions/postgresVersion=\"*\" cannot be combined with profile; omit profile to list every configured or discoverable version."
+                    "includeAllVersions/postgresVersion=\"*\" cannot be combined with profile; omit profile to list configured profiles and running managed-local versions."
                 );
             }
             let profiles = self.profiles_for_all_version_operations()?;
@@ -2437,7 +2434,7 @@ impl PostgresSandboxManager {
         ) {
             if input.profile.is_some() {
                 anyhow::bail!(
-                    "includeAllVersions/postgresVersion=\"*\" cannot be combined with profile; omit profile to clean up every configured or discoverable version."
+                    "includeAllVersions/postgresVersion=\"*\" cannot be combined with profile; omit profile to clean up configured profiles and running managed-local versions."
                 );
             }
             let profiles = self.profiles_for_all_version_operations()?;
@@ -2610,20 +2607,38 @@ impl PostgresSandboxManager {
         let mut profiles = Vec::new();
         for profile in &self.config.profiles {
             let resolved = if profile.managed_local {
-                self.ensure_managed_local_profile(profile.postgres_version.as_deref())?
+                self.running_managed_local_profile(profile.postgres_version.as_deref())
             } else {
-                profile.clone()
+                Some(profile.clone())
             };
-            push_unique_profile(&mut profiles, resolved);
+            if let Some(resolved) = resolved {
+                push_unique_profile(&mut profiles, resolved);
+            }
         }
         if self.config.managed_local.enabled {
             for installation in discover_local_postgres_installations() {
-                let profile =
-                    self.ensure_managed_local_profile(Some(&installation.postgres_version))?;
-                push_unique_profile(&mut profiles, profile);
+                if let Some(profile) =
+                    self.running_managed_local_profile(Some(&installation.postgres_version))
+                {
+                    push_unique_profile(&mut profiles, profile);
+                }
             }
         }
         Ok(profiles)
+    }
+
+    fn running_managed_local_profile(
+        &self,
+        postgres_version: Option<&str>,
+    ) -> Option<SandboxProfile> {
+        let cluster = LocalPostgresCluster::from_env_for_version(postgres_version).ok()?;
+        let status = cluster.status().ok()?;
+        if !status.running {
+            return None;
+        }
+        status
+            .config
+            .map(|local_config| self.profile_from_local_config(local_config))
     }
 
     fn profile_names_for_scope_hint(&self) -> Vec<String> {
@@ -5865,6 +5880,8 @@ mod tests {
             .hints
             .iter()
             .any(|hint| hint.contains("without --admin-url")));
+        let profile = serde_json::to_value(&output.profiles[0]).unwrap();
+        assert!(profile.get("serverVersion").is_none());
     }
 
     #[test]
@@ -5874,6 +5891,34 @@ mod tests {
         assert!(all_versions_requested(Some(" * "), Some(false)));
         assert!(!all_versions_requested(Some("18"), Some(false)));
         assert!(!all_versions_requested(None, None));
+    }
+
+    #[test]
+    fn all_version_profile_scan_skips_deferred_managed_local_without_starting() {
+        let mut config = test_config();
+        config.managed_local.enabled = true;
+        config.profiles.push(SandboxProfile {
+            name: "local-pg123456".to_string(),
+            admin_url: DEFERRED_LOCAL_ADMIN_URL.to_string(),
+            database_prefix: "pgsandbox".to_string(),
+            default_ttl_minutes: 240,
+            max_ttl_minutes: 1440,
+            allow_external_admin_url: false,
+            allowed_admin_hosts: Vec::new(),
+            max_active_databases_per_owner: None,
+            postgres_version: Some("123456".to_string()),
+            managed_local: true,
+        });
+        let manager = PostgresSandboxManager::new(config);
+
+        let profiles = manager.profiles_for_all_version_operations().unwrap();
+        let names = profiles
+            .iter()
+            .map(|profile| profile.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"default"));
+        assert!(!names.contains(&"local-pg123456"));
     }
 
     #[test]
