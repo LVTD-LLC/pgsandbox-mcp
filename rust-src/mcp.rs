@@ -240,7 +240,6 @@ impl PgsandboxServer {
             ("hasProfile", json!(input.profile.is_some())),
             ("hasDatabaseId", json!(input.database_id.is_some())),
             ("hasDatabaseName", json!(input.database_name.is_some())),
-            ("hasBaseDigest", json!(true)),
         ]);
         self.tracked_tool(
             "schema_diff",

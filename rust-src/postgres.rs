@@ -5003,7 +5003,6 @@ fn record_summary_to_json(row: &Row) -> Value {
     json!({
         "databaseId": database_id,
         "profile": profile_name,
-        "profileName": profile_name,
         "databaseName": database_name,
         "roleName": role_name,
         "owner": owner,
