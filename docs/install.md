@@ -310,6 +310,10 @@ commands only when they are safe for the target sandbox.
   using `clone_database` or template tools.
 - Occupied local ports: run `pgsandbox-mcp local start`; the managed runtime
   scans upward from `65432` and does not take over `5432`.
+- Old managed-local socket path after upgrade: TCP connections continue to work,
+  but Unix-socket consumers should run `pgsandbox-mcp local stop` and then
+  `pgsandbox-mcp local start` to move the live socket under
+  `/tmp/pgsandbox-sockets/`.
 - Stale MCP admin URL: rerun `pgsandbox-mcp setup --client <client>` without
   `--admin-url`, restart the MCP client, and rerun `pgsandbox-mcp doctor`.
 - Permissions under `~/.pgsandbox`: check ownership of the directory or set

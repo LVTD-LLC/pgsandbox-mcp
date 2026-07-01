@@ -19,6 +19,35 @@ use crate::{
     telemetry::{properties, Telemetry, EVENT_MCP_SERVER_STARTED, EVENT_MCP_TOOL_COMPLETED},
 };
 
+pub const PUBLIC_MCP_TOOLS: &[&str] = &[
+    "list_profiles",
+    "create_database",
+    "clone_database",
+    "delete_database",
+    "get_connection_string",
+    "run_sql",
+    "describe_schema",
+    "schema_digest",
+    "schema_diff",
+    "explain_query",
+    "create_schema_snapshot",
+    "list_schema_snapshots",
+    "delete_schema_snapshot",
+    "diff_schema_snapshot",
+    "prepare_for_repo",
+    "run_migrations",
+    "validate_migration",
+    "seed_database",
+    "create_template_from_sandbox",
+    "create_sandbox_from_template",
+    "list_templates",
+    "delete_template",
+    "list_databases",
+    "cleanup_expired",
+];
+
+pub const PUBLIC_MCP_TOOL_COUNT: usize = PUBLIC_MCP_TOOLS.len();
+
 #[derive(Clone)]
 pub struct PgsandboxServer {
     manager: PostgresSandboxManager,
@@ -642,11 +671,29 @@ impl ToolErrorResponse {
 }
 
 fn sanitize_error_message(message: &str) -> String {
-    message
-        .split_whitespace()
-        .map(sanitize_error_token)
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut sanitized = String::with_capacity(message.len());
+    let mut cursor = 0;
+
+    while let Some(relative_start) = find_postgres_url_start(&message[cursor..]) {
+        let start = cursor + relative_start;
+        sanitized.push_str(&message[cursor..start]);
+
+        let tail = &message[start..];
+        let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
+        sanitized.push_str(&sanitize_error_token(&tail[..end]));
+        cursor = start + end;
+    }
+
+    sanitized.push_str(&message[cursor..]);
+    sanitized
+}
+
+fn find_postgres_url_start(message: &str) -> Option<usize> {
+    let lower = message.to_ascii_lowercase();
+    [lower.find("postgres://"), lower.find("postgresql://")]
+        .into_iter()
+        .flatten()
+        .min()
 }
 
 fn sanitize_error_token(token: &str) -> String {
@@ -688,5 +735,35 @@ mod tests {
             .unwrap()
             .contains("pgsandbox-mcp doctor"));
         assert!(!text.contains("postgres:postgres@"));
+    }
+
+    #[test]
+    fn sanitizes_postgres_urls_inside_punctuation() {
+        let sanitized = sanitize_error_message(
+            "failed (postgresql://postgres:secret@localhost:5432/postgres), retry 'postgres://pg:another-secret@127.0.0.1/db'",
+        );
+
+        assert!(sanitized.contains("(postgresql://postgres:****@localhost:5432/postgres),"));
+        assert!(sanitized.contains("'postgres://pg:****@127.0.0.1/db'"));
+        assert!(!sanitized.contains("secret@"));
+        assert!(!sanitized.contains("another-secret@"));
+    }
+
+    #[test]
+    fn public_tool_metadata_matches_tool_registrations() {
+        let source = include_str!("mcp.rs");
+        let tool_attribute = concat!("#[", "tool(");
+
+        assert_eq!(
+            PUBLIC_MCP_TOOL_COUNT,
+            source.matches(tool_attribute).count(),
+            "PUBLIC_MCP_TOOLS must be updated when adding or removing #[tool] registrations"
+        );
+        for tool_name in PUBLIC_MCP_TOOLS {
+            assert!(
+                source.contains(&format!("async fn {tool_name}(")),
+                "PUBLIC_MCP_TOOLS contains {tool_name}, but no matching tool method exists"
+            );
+        }
     }
 }

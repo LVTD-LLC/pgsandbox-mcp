@@ -64,7 +64,9 @@ Returns:
 
 - `serverVersion`
 - `toolCount`
-- `restartRequiredAfterSetup`
+- `restartRequiredAfterSetupNote`: advisory text. This is not live restart
+  state; it reminds clients to restart after setup or upgrades because MCP
+  clients cache tool metadata.
 - `availablePostgresVersions`
 - `hints`
 - `profiles`: profile summaries with `name`, `postgresVersion`, `managedLocal`,

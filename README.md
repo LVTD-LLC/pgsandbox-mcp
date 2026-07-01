@@ -457,6 +457,10 @@ CLI output masks the password.
 On Unix, the socket directory is a short PGSandbox-owned path under
 `/tmp/pgsandbox-sockets/` so deeply nested `PGSANDBOX_HOME` values do not exceed
 Postgres Unix socket path limits.
+If you upgrade from a version that stored sockets under `~/.pgsandbox/` while a
+managed local cluster is already running, TCP connections continue to work. To
+move the running Unix socket to the short path immediately, run
+`pgsandbox-mcp local stop` and then `pgsandbox-mcp local start`.
 PGSandbox first uses PostgreSQL server binaries on `PATH`, then checks common
 Homebrew and Postgres.app install locations such as
 `/opt/homebrew/opt/postgresql@18/bin`. If an older MCP client config still

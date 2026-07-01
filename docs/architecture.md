@@ -104,6 +104,11 @@ sets `unix_socket_directories` to a short PGSandbox-owned directory under
 `/tmp/pgsandbox-sockets/` on Unix. Keeping sockets outside deep
 `PGSANDBOX_HOME` trees avoids macOS Postgres socket path limits while data,
 logs, and private config remain under the managed state directory.
+Already-running clusters keep their existing socket directory until the next
+stop/start cycle. After upgrading from a version that stored sockets under
+`PGSANDBOX_HOME`, run `pgsandbox-mcp local stop` and then
+`pgsandbox-mcp local start` if a local Unix-socket consumer needs the new short
+path immediately.
 
 ## Profiles
 

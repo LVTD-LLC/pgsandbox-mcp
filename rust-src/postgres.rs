@@ -38,6 +38,7 @@ use crate::{
         DEFERRED_LOCAL_ADMIN_URL,
     },
     local::{discover_local_postgres_installations, LocalClusterConfig, LocalPostgresCluster},
+    mcp::PUBLIC_MCP_TOOL_COUNT,
     names::{make_sandbox_names, quote_ident, quote_literal},
 };
 
@@ -53,7 +54,6 @@ const MAX_WORKFLOW_TIMEOUT_SECONDS: u64 = 600;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 8_000;
 const TEMPLATE_PRIVACY_WARNING: &str =
     "Templates are local PG Sandbox artifacts. Do not create templates from production or sensitive data unless you have explicitly sanitized it.";
-const PUBLIC_MCP_TOOL_COUNT: usize = 24;
 
 static CURSOR_QUERY_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?is)^\s*(?:--[^\n]*(?:\n|$)|/\*.*?\*/\s*)*(select|with|values|table)\b")
@@ -298,7 +298,7 @@ pub struct ListDatabasesOutput {
 pub struct ListProfilesOutput {
     pub server_version: String,
     pub tool_count: usize,
-    pub restart_required_after_setup: bool,
+    pub restart_required_after_setup_note: String,
     pub available_postgres_versions: Vec<String>,
     pub hints: Vec<String>,
     pub profiles: Vec<ProfileSummary>,
@@ -944,7 +944,7 @@ impl PostgresSandboxManager {
         Ok(ListProfilesOutput {
             server_version: crate::VERSION.to_string(),
             tool_count: PUBLIC_MCP_TOOL_COUNT,
-            restart_required_after_setup: true,
+            restart_required_after_setup_note: restart_required_after_setup_note(),
             available_postgres_versions,
             hints: list_profile_hints(&self.config),
             profiles,
@@ -2426,16 +2426,20 @@ fn unknown_postgres_version_error(config: &SandboxConfig, version: &str) -> anyh
 }
 
 fn list_profile_hints(config: &SandboxConfig) -> Vec<String> {
-    let mut hints = vec![format!(
-        "MCP clients cache tool metadata. After setup or upgrade, restart the MCP client and verify pgsandbox-mcp reports {} tools.",
-        PUBLIC_MCP_TOOL_COUNT
-    )];
+    let mut hints = vec![restart_required_after_setup_note()];
     if !config.managed_local.enabled {
         hints.push(
             "This server is using explicit configured Postgres profile(s), not managed local version discovery. If this was accidental or stale, rerun `pgsandbox-mcp setup --client <client>` without --admin-url and restart the MCP client.".to_string(),
         );
     }
     hints
+}
+
+fn restart_required_after_setup_note() -> String {
+    format!(
+        "MCP clients cache tool metadata. After setup or upgrade, restart the MCP client and verify pgsandbox-mcp reports {} tools.",
+        PUBLIC_MCP_TOOL_COUNT
+    )
 }
 
 fn profile_admin_url_summary(profile: &SandboxProfile) -> String {
@@ -5495,7 +5499,7 @@ mod tests {
     }
 
     #[test]
-    fn list_profiles_reports_version_tool_count_and_restart_hint() {
+    fn list_profiles_reports_version_tool_count_and_restart_note() {
         let manager = PostgresSandboxManager::new(test_config());
         let output = manager
             .list_profiles(ListProfilesInput {
@@ -5505,7 +5509,9 @@ mod tests {
 
         assert_eq!(output.server_version, crate::VERSION);
         assert_eq!(output.tool_count, PUBLIC_MCP_TOOL_COUNT);
-        assert!(output.restart_required_after_setup);
+        assert!(output
+            .restart_required_after_setup_note
+            .contains("After setup or upgrade"));
         assert!(output
             .hints
             .iter()
