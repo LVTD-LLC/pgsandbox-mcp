@@ -456,10 +456,12 @@ credentials through environment variables, not permanent settings rewrites.
 By default, `list_databases` and `cleanup_expired` are scoped to the selected
 profile. Pass `includeAllVersions: true` or `postgresVersion: "*"` for an
 explicit cross-version listing or cleanup across configured profiles and running
-managed-local versions. Clone requests preflight source and target Postgres
-majors before creating the target sandbox; newer-to-older clone paths fail with
-`restore_incompatible` and include `sourceVersion` and `targetVersion` instead
-of creating a sandbox and then failing during restore.
+managed-local versions. Those all-version operations continue past individual
+profile connection failures and return profile-level `failures` entries. Clone
+requests preflight source and target Postgres majors before creating the target
+sandbox; newer-to-older clone paths fail with `restore_incompatible` and include
+`sourceVersion` and `targetVersion` instead of creating a sandbox and then
+failing during restore.
 
 ## Local Shape
 

@@ -470,6 +470,8 @@ Returns:
   `createdAt`, and `expiresAt`. Legacy snake_case aliases remain present for
   compatibility.
 - `truncated`: whether more matching records exist beyond the returned page
+- `failures`: profile-level failures for all-version listings. Each entry has
+  `profile`, `category: "profile_unavailable"`, and a safe `message`.
 
 ## `cleanup_expired`
 
@@ -494,7 +496,9 @@ Returns:
   profile, so agents know whether another cleanup call may be needed
 - resources selected
 - resources deleted
-- failures
+- failures. All-version cleanup reports profile-level failures with `profile`,
+  `category: "profile_unavailable"`, and a safe `message` while continuing with
+  other profiles.
 
 ## Stable Agent Contract
 

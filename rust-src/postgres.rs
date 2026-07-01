@@ -295,6 +295,8 @@ pub struct ListDatabasesOutput {
     pub profiles: Vec<String>,
     pub databases: Vec<Value>,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1369,13 +1371,19 @@ impl PostgresSandboxManager {
                 .map(|profile| profile.name.clone())
                 .collect::<Vec<_>>();
             let mut databases = Vec::new();
+            let mut failures = Vec::new();
             let mut truncated = false;
             for profile in &profiles {
-                let result = self
+                match self
                     .list_databases_for_profile(profile, input.owner.as_ref())
-                    .await?;
-                truncated |= result.truncated;
-                databases.extend(result.databases);
+                    .await
+                {
+                    Ok(result) => {
+                        truncated |= result.truncated;
+                        databases.extend(result.databases);
+                    }
+                    Err(error) => failures.push(profile_operation_failure(profile, error)),
+                }
             }
             if databases.len() > LIST_DATABASES_LIMIT {
                 databases.truncate(LIST_DATABASES_LIMIT);
@@ -1386,6 +1394,7 @@ impl PostgresSandboxManager {
                 profiles: profile_names,
                 databases,
                 truncated,
+                failures,
             });
         }
 
@@ -1435,6 +1444,7 @@ impl PostgresSandboxManager {
                 .map(record_summary_to_json)
                 .collect(),
             truncated,
+            failures: Vec::new(),
         })
     }
 
@@ -2446,15 +2456,19 @@ impl PostgresSandboxManager {
             let mut deleted = Vec::new();
             let mut failures = Vec::new();
             for profile in &profiles {
-                let result = self.cleanup_expired_for_profile(profile, dry_run).await?;
-                if let Some(profile_selected) = result.selected {
-                    selected.extend(profile_selected);
-                }
-                if let Some(profile_deleted) = result.deleted {
-                    deleted.extend(profile_deleted);
-                }
-                if let Some(profile_failures) = result.failures {
-                    failures.extend(profile_failures);
+                match self.cleanup_expired_for_profile(profile, dry_run).await {
+                    Ok(result) => {
+                        if let Some(profile_selected) = result.selected {
+                            selected.extend(profile_selected);
+                        }
+                        if let Some(profile_deleted) = result.deleted {
+                            deleted.extend(profile_deleted);
+                        }
+                        if let Some(profile_failures) = result.failures {
+                            failures.extend(profile_failures);
+                        }
+                    }
+                    Err(error) => failures.push(profile_operation_failure(profile, error)),
                 }
             }
             return Ok(CleanupExpiredOutput {
@@ -2465,7 +2479,7 @@ impl PostgresSandboxManager {
                 dry_run,
                 selected: dry_run.then_some(selected),
                 deleted: (!dry_run).then_some(deleted),
-                failures: (!dry_run).then_some(failures),
+                failures: (!failures.is_empty() || !dry_run).then_some(failures),
             });
         }
 
@@ -2696,6 +2710,14 @@ fn restart_required_after_setup_note() -> String {
         "MCP clients cache tool metadata. After setup or upgrade, restart the MCP client and verify pgsandbox-mcp reports {} tools.",
         PUBLIC_MCP_TOOL_COUNT
     )
+}
+
+fn profile_operation_failure(profile: &SandboxProfile, error: anyhow::Error) -> Value {
+    json!({
+        "profile": profile.name,
+        "category": "profile_unavailable",
+        "message": format!("{error:#}"),
+    })
 }
 
 fn profile_admin_url_summary(profile: &SandboxProfile) -> String {
@@ -5919,6 +5941,59 @@ mod tests {
 
         assert!(names.contains(&"default"));
         assert!(!names.contains(&"local-pg123456"));
+    }
+
+    #[tokio::test]
+    async fn all_version_list_collects_profile_connection_failures() {
+        let mut config = test_config();
+        config.profiles[0].admin_url =
+            "postgres://postgres:secret@127.0.0.1:1/postgres?sslmode=disable".to_string();
+        let manager = PostgresSandboxManager::new(config);
+
+        let output = manager
+            .list_databases(ListDatabasesInput {
+                profile: None,
+                postgres_version: None,
+                include_all_versions: Some(true),
+                owner: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(output.scope, "allVersions");
+        assert!(output.databases.is_empty());
+        assert_eq!(output.failures.len(), 1);
+        assert_eq!(output.failures[0]["profile"], "default");
+        assert_eq!(output.failures[0]["category"], "profile_unavailable");
+        assert!(!output.failures[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn all_version_cleanup_collects_profile_connection_failures() {
+        let mut config = test_config();
+        config.profiles[0].admin_url =
+            "postgres://postgres:secret@127.0.0.1:1/postgres?sslmode=disable".to_string();
+        let manager = PostgresSandboxManager::new(config);
+
+        let output = manager
+            .cleanup_expired(CleanupExpiredInput {
+                profile: None,
+                postgres_version: None,
+                include_all_versions: Some(true),
+                dry_run: Some(true),
+            })
+            .await
+            .unwrap();
+
+        let failures = output.failures.unwrap();
+        assert_eq!(output.scope, "allVersions");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0]["profile"], "default");
+        assert_eq!(failures[0]["category"], "profile_unavailable");
+        assert!(!failures[0]["message"].as_str().unwrap().contains("secret"));
     }
 
     #[test]
