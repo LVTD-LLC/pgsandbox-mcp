@@ -3,11 +3,13 @@ use rmcp::{
     model::{CallToolResult, Content},
     tool, tool_router, ErrorData, ServiceExt,
 };
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::{
     config::SandboxConfig,
+    doctor::run_doctor,
     postgres::{
         CleanupExpiredInput, CloneDatabaseInput, CreateDatabaseInput,
         CreateSandboxFromTemplateInput, CreateSchemaSnapshotInput, CreateTemplateFromSandboxInput,
@@ -35,7 +37,9 @@ pub const PUBLIC_MCP_TOOLS: &[&str] = &[
     "delete_schema_snapshot",
     "diff_schema_snapshot",
     "prepare_for_repo",
+    "run_repo_command",
     "run_migrations",
+    "validate_schema_change",
     "validate_migration",
     "seed_database",
     "create_template_from_sandbox",
@@ -44,6 +48,7 @@ pub const PUBLIC_MCP_TOOLS: &[&str] = &[
     "delete_template",
     "list_databases",
     "cleanup_expired",
+    "doctor",
 ];
 
 pub const PUBLIC_MCP_TOOL_COUNT: usize = PUBLIC_MCP_TOOLS.len();
@@ -52,6 +57,21 @@ pub const PUBLIC_MCP_TOOL_COUNT: usize = PUBLIC_MCP_TOOLS.len();
 pub struct PgsandboxServer {
     manager: PostgresSandboxManager,
     telemetry: Telemetry,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct DoctorInput {
+    postgres_version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorOutput {
+    ok: bool,
+    server_version: String,
+    tool_count: usize,
+    lines: Vec<String>,
 }
 
 impl PgsandboxServer {
@@ -374,7 +394,31 @@ impl PgsandboxServer {
         .await
     }
 
-    #[tool(description = "Run an explicit Django migration command against a sandbox database.")]
+    #[tool(
+        description = "Run an explicit repo command against a sandbox database with DATABASE_URL and PG* env vars scoped to the sandbox."
+    )]
+    async fn run_repo_command(
+        &self,
+        Parameters(input): Parameters<RunMigrationsInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let event_properties = properties([
+            ("hasProfile", json!(input.profile.is_some())),
+            ("hasDatabaseId", json!(input.database_id.is_some())),
+            ("hasDatabaseName", json!(input.database_name.is_some())),
+            ("hasCommand", json!(input.command.is_some())),
+            ("hasTimeout", json!(input.timeout_seconds.is_some())),
+        ]);
+        self.tracked_tool(
+            "run_repo_command",
+            event_properties,
+            self.manager.run_repo_command(input),
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Run an explicit repo schema-change command against a sandbox database. Backward-compatible alias for generic repo command workflows."
+    )]
     async fn run_migrations(
         &self,
         Parameters(input): Parameters<RunMigrationsInput>,
@@ -394,7 +438,37 @@ impl PgsandboxServer {
         .await
     }
 
-    #[tool(description = "Run Django migrations in a sandbox and return before/after schema diff.")]
+    #[tool(
+        description = "Run an explicit repo schema-change command in a sandbox and return a before/after schema diff."
+    )]
+    async fn validate_schema_change(
+        &self,
+        Parameters(input): Parameters<ValidateMigrationInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let event_properties = properties([
+            ("hasProfile", json!(input.profile.is_some())),
+            ("hasDatabaseId", json!(input.database_id.is_some())),
+            ("hasDatabaseName", json!(input.database_name.is_some())),
+            ("hasCommand", json!(input.command.is_some())),
+            ("hasTimeout", json!(input.timeout_seconds.is_some())),
+            ("hasTtlMinutes", json!(input.ttl_minutes.is_some())),
+            ("hasOwner", json!(input.owner.is_some())),
+            (
+                "labelCount",
+                json!(input.labels.as_ref().map_or(0, |labels| labels.len())),
+            ),
+        ]);
+        self.tracked_tool(
+            "validate_schema_change",
+            event_properties,
+            self.manager.validate_schema_change(input),
+        )
+        .await
+    }
+
+    #[tool(
+        description = "Run an explicit repo schema-change command in a sandbox and return before/after schema diff. Backward-compatible alias for migration workflows."
+    )]
     async fn validate_migration(
         &self,
         Parameters(input): Parameters<ValidateMigrationInput>,
@@ -592,6 +666,30 @@ impl PgsandboxServer {
         )
         .await
     }
+
+    #[tool(
+        description = "Return MCP-safe version, profile health, and redacted doctor diagnostics without mutating sandboxes."
+    )]
+    async fn doctor(
+        &self,
+        Parameters(input): Parameters<DoctorInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let event_properties = properties([(
+            "hasPostgresVersion",
+            json!(input.postgres_version.is_some()),
+        )]);
+        self.tracked_tool("doctor", event_properties, async move {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let result = run_doctor(None, input.postgres_version.as_deref(), &cwd).await;
+            anyhow::Ok(DoctorOutput {
+                ok: result.ok,
+                server_version: crate::VERSION.to_string(),
+                tool_count: PUBLIC_MCP_TOOL_COUNT,
+                lines: result.lines,
+            })
+        })
+        .await
+    }
 }
 
 pub async fn serve_stdio(config: SandboxConfig) -> anyhow::Result<()> {
@@ -652,6 +750,8 @@ struct ToolErrorBody {
     message: String,
     hint: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    sqlstate: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     requested_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     source_version: Option<String>,
@@ -667,7 +767,30 @@ impl ToolErrorResponse {
     fn from_error(error: &anyhow::Error) -> Self {
         let chain = sanitize_error_message(&format!("{error:#}"));
         let lower = chain.to_ascii_lowercase();
-        let body = if lower.contains("password authentication failed")
+        let body = if let Some(body) = postgres_db_error_body(error, &chain) {
+            body
+        } else if let Some(body) = stringly_sql_error_body(&lower, &chain) {
+            body
+        } else if lower.contains("basedigest string must contain")
+            || lower.contains("basedigest must be a schema_digest response")
+        {
+            ToolErrorBody {
+                code: "invalid_base_digest",
+                category: "validation",
+                message: chain,
+                hint: "Pass baseDigest as the full schema_digest response object or a JSON string containing that full object. A checksum alone cannot compute a diff; use schema snapshots for compact stored baselines.".to_string(),
+                sqlstate: None,
+                requested_version: None,
+                source_version: None,
+                target_version: None,
+                detected_versions: Vec::new(),
+                detail_handle: Some(json!({
+                    "type": "tool-contract",
+                    "tool": "schema_diff",
+                    "field": "baseDigest"
+                })),
+            }
+        } else if lower.contains("password authentication failed")
             || lower.contains("authentication failed")
         {
             ToolErrorBody {
@@ -675,6 +798,7 @@ impl ToolErrorResponse {
                 category: "postgres",
                 message: chain,
                 hint: "Run `pgsandbox-mcp doctor` to identify the active config source. If an MCP client config has a stale explicit PGSANDBOX_ADMIN_DATABASE_URL, run `pgsandbox-mcp setup --client <client>` without --admin-url, restart the MCP client, and retry.".to_string(),
+                sqlstate: None,
                 requested_version: None,
                 source_version: None,
                 target_version: None,
@@ -687,6 +811,7 @@ impl ToolErrorResponse {
                 category: "constraint_violation",
                 message: chain,
                 hint: "The SQL violated a database constraint. Inspect the constraint name and adjust the input or query before retrying.".to_string(),
+                sqlstate: None,
                 requested_version: None,
                 source_version: None,
                 target_version: None,
@@ -701,6 +826,7 @@ impl ToolErrorResponse {
                 category: "readonly_violation",
                 message: chain,
                 hint: "The request attempted a write or session change through a readonly path. Retry with readonly=false only if mutation is intended.".to_string(),
+                sqlstate: None,
                 requested_version: None,
                 source_version: None,
                 target_version: None,
@@ -713,6 +839,7 @@ impl ToolErrorResponse {
                 category: "database_not_found",
                 message: chain,
                 hint: "Retry with the sandbox's profile or postgresVersion, or call list_databases with includeAllVersions=true to discover active sandboxes across versions.".to_string(),
+                sqlstate: None,
                 requested_version: None,
                 source_version: None,
                 target_version: None,
@@ -725,6 +852,7 @@ impl ToolErrorResponse {
                 category: "version_mismatch",
                 message: chain.clone(),
                 hint: "When selecting by postgresVersion, omit profile unless intentionally targeting an exact versioned profile. Use list_profiles to inspect profile/version pairs.".to_string(),
+                sqlstate: None,
                 requested_version: requested_version_from_message(&chain),
                 source_version: None,
                 target_version: None,
@@ -742,6 +870,7 @@ impl ToolErrorResponse {
                 category: "restore_incompatible",
                 message: chain.clone(),
                 hint: "Clone into the same or newer target Postgres major version, or create a dump that is compatible with the older target.".to_string(),
+                sqlstate: None,
                 requested_version: target_version
                     .clone()
                     .or_else(|| requested_version_from_message(&chain)),
@@ -766,6 +895,7 @@ impl ToolErrorResponse {
                     .map(|version| format!("Local Postgres {version} binaries are unavailable."))
                     .unwrap_or_else(|| "Local Postgres binaries are unavailable.".to_string()),
                 hint: "Install local PostgreSQL server binaries for the requested major version, set PGSANDBOX_POSTGRES_BIN_DIR or PGSANDBOX_POSTGRES_<MAJOR>_BIN_DIR, or choose a version shown by list_profiles.".to_string(),
+                sqlstate: None,
                 requested_version,
                 source_version: None,
                 target_version: None,
@@ -789,6 +919,7 @@ impl ToolErrorResponse {
                     })
                     .unwrap_or(chain),
                 hint: "Use a postgresVersion listed by list_profiles, add a matching explicit profile, or rerun setup without --admin-url to use managed local version discovery.".to_string(),
+                sqlstate: None,
                 requested_version,
                 source_version: None,
                 target_version: None,
@@ -807,6 +938,7 @@ impl ToolErrorResponse {
                 category: "postgres",
                 message: chain,
                 hint: "Run `pgsandbox-mcp doctor` to verify the configured profile and connectivity. For managed local, try `pgsandbox-mcp local status` or `pgsandbox-mcp local start`.".to_string(),
+                sqlstate: None,
                 requested_version: None,
                 source_version: None,
                 target_version: None,
@@ -819,6 +951,7 @@ impl ToolErrorResponse {
                 category: "unknown",
                 message: chain,
                 hint: "Run `pgsandbox-mcp doctor` for a local diagnostic, then retry the tool with the same profile or postgresVersion.".to_string(),
+                sqlstate: None,
                 requested_version: None,
                 source_version: None,
                 target_version: None,
@@ -832,6 +965,97 @@ impl ToolErrorResponse {
             error: body,
         }
     }
+}
+
+fn postgres_db_error_body(error: &anyhow::Error, message: &str) -> Option<ToolErrorBody> {
+    let postgres_error = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<tokio_postgres::Error>())?;
+    let db_error = postgres_error.as_db_error()?;
+    sqlstate_error_body(db_error.code().code(), message.to_string())
+}
+
+fn stringly_sql_error_body(lower: &str, message: &str) -> Option<ToolErrorBody> {
+    let sqlstate = if lower.contains("column") && lower.contains("does not exist") {
+        Some("42703")
+    } else if lower.contains("relation") && lower.contains("does not exist") {
+        Some("42P01")
+    } else if lower.contains("syntax error") {
+        Some("42601")
+    } else if lower.contains("permission denied") {
+        Some("42501")
+    } else if lower.contains("statement timeout") {
+        Some("57014")
+    } else if lower.contains("lock timeout") || lower.contains("canceling statement due to lock") {
+        Some("55P03")
+    } else {
+        None
+    }?;
+    sqlstate_error_body(sqlstate, message.to_string())
+}
+
+fn sqlstate_error_body(sqlstate: &str, message: String) -> Option<ToolErrorBody> {
+    let (code, category, hint) = match sqlstate {
+        "42703" => (
+            "undefined_column",
+            "sql_analysis",
+            "The query references a column that does not exist. Call describe_schema or check identifier spelling/casing before retrying.",
+        ),
+        "42P01" => (
+            "undefined_table",
+            "sql_analysis",
+            "The query references a table or relation that does not exist. Call describe_schema or verify the schema/search_path before retrying.",
+        ),
+        "42601" => (
+            "syntax_error",
+            "sql_syntax",
+            "Revise the SQL syntax and retry. describe_schema can help confirm object names, but doctor is not needed for a syntax error.",
+        ),
+        "42501" => (
+            "permission_denied",
+            "permission_denied",
+            "The sandbox role lacks permission for this operation. Use allowed sandbox operations or inspect object ownership/privileges.",
+        ),
+        "55P03" => (
+            "lock_timeout",
+            "timeout",
+            "The statement could not acquire a lock in time. Retry after the conflicting transaction completes or inspect active sessions.",
+        ),
+        "57014" => (
+            "statement_timeout",
+            "timeout",
+            "The statement was canceled by Postgres. Simplify the query, add a narrower predicate, or retry with a smaller operation.",
+        ),
+        state if state.starts_with("23") => (
+            "constraint_violation",
+            "constraint_violation",
+            "The SQL violated a database constraint. Inspect the constraint name and adjust the input or query before retrying.",
+        ),
+        state if state.starts_with("08") => (
+            "postgres_connection_failed",
+            "postgres",
+            "Run doctor to verify connectivity, then retry the tool with the same profile or postgresVersion.",
+        ),
+        "25006" => (
+            "readonly_violation",
+            "readonly_violation",
+            "The request attempted a write through a readonly path. Retry with readonly=false only if mutation is intended.",
+        ),
+        _ => return None,
+    };
+
+    Some(ToolErrorBody {
+        code,
+        category,
+        message,
+        hint: hint.to_string(),
+        sqlstate: Some(sqlstate.to_string()),
+        requested_version: None,
+        source_version: None,
+        target_version: None,
+        detected_versions: Vec::new(),
+        detail_handle: None,
+    })
 }
 
 fn detected_postgres_versions() -> Vec<String> {
@@ -965,6 +1189,21 @@ mod tests {
                 "restore_incompatible",
                 "restore_incompatible",
             ),
+            (
+                "db error: ERROR: column \"definitely_missing_column\" does not exist",
+                "undefined_column",
+                "sql_analysis",
+            ),
+            (
+                "db error: ERROR: syntax error at or near \"fromm\"",
+                "syntax_error",
+                "sql_syntax",
+            ),
+            (
+                "baseDigest must be a schema_digest response: baseDigest string must contain the full JSON schema_digest response, not only the checksum",
+                "invalid_base_digest",
+                "validation",
+            ),
         ];
 
         for (message, code, category) in cases {
@@ -975,6 +1214,21 @@ mod tests {
             assert_eq!(value["error"]["code"], code);
             assert_eq!(value["error"]["category"], category);
         }
+    }
+
+    #[test]
+    fn sqlstate_classifier_returns_agent_actionable_hints() {
+        let undefined_column =
+            sqlstate_error_body("42703", "ERROR: missing column".to_string()).unwrap();
+        let syntax = sqlstate_error_body("42601", "ERROR: syntax error".to_string()).unwrap();
+        let connection = sqlstate_error_body("08006", "connection failure".to_string()).unwrap();
+
+        assert_eq!(undefined_column.code, "undefined_column");
+        assert_eq!(undefined_column.sqlstate.as_deref(), Some("42703"));
+        assert!(undefined_column.hint.contains("describe_schema"));
+        assert_eq!(syntax.category, "sql_syntax");
+        assert!(!syntax.hint.contains("doctor is needed"));
+        assert_eq!(connection.code, "postgres_connection_failed");
     }
 
     #[test]
