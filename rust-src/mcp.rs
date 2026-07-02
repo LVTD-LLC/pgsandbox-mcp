@@ -770,6 +770,7 @@ impl ToolErrorResponse {
         let body = if let Some(body) = postgres_db_error_body(error, &chain) {
             body
         } else if let Some(body) = stringly_sql_error_body(&lower, &chain) {
+            // Fallback for Postgres-shaped messages when no typed DbError is in the chain.
             body
         } else if lower.contains("basedigest string must contain")
             || lower.contains("basedigest must be a schema_digest response")

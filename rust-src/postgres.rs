@@ -2265,16 +2265,30 @@ impl PostgresSandboxManager {
         &self,
         input: RunMigrationsInput,
     ) -> anyhow::Result<WorkflowEnvelope<CommandWorkflowOutput>> {
-        self.run_repo_schema_command(input, "Schema change command", "schema-change-run")
-            .await
+        self.run_repo_schema_command(
+            input,
+            "Migrations",
+            "migration-run",
+            "migration_failed",
+            "Migration command",
+            true,
+        )
+        .await
     }
 
     pub async fn run_repo_command(
         &self,
         input: RunMigrationsInput,
     ) -> anyhow::Result<WorkflowEnvelope<CommandWorkflowOutput>> {
-        self.run_repo_schema_command(input, "Repo command", "repo-command-run")
-            .await
+        self.run_repo_schema_command(
+            input,
+            "Repo command",
+            "repo-command-run",
+            "repo_command_failed",
+            "Repo command",
+            false,
+        )
+        .await
     }
 
     async fn run_repo_schema_command(
@@ -2282,6 +2296,9 @@ impl PostgresSandboxManager {
         input: RunMigrationsInput,
         label: &'static str,
         detail_type: &'static str,
+        command_failure_code: &'static str,
+        command_failure_subject: &'static str,
+        use_migration_missing_code: bool,
     ) -> anyhow::Result<WorkflowEnvelope<CommandWorkflowOutput>> {
         if !selector_has_database(&input.database_id, &input.database_name) {
             return Ok(workflow_failure(
@@ -2307,7 +2324,7 @@ impl PostgresSandboxManager {
             Err(error) => {
                 return Ok(workflow_failure(
                     format!("{label} was not run."),
-                    error,
+                    migration_alias_command_error(error, use_migration_missing_code),
                     None,
                 ))
             }
@@ -2348,12 +2365,15 @@ impl PostgresSandboxManager {
             workflow_failure(
                 format!("{label} failed."),
                 workflow_error(
-                    "repo_command_failed",
-                    format!("Repo command exited with {:?}", output.exit_code),
-                    Some(
-                        "Inspect stderr/stdout in the result and rerun after fixing the command."
-                            .to_string(),
+                    command_failure_code,
+                    format!(
+                        "{command_failure_subject} exited with {:?}",
+                        output.exit_code
                     ),
+                    Some(format!(
+                        "Inspect stderr/stdout in the result and rerun after fixing the {}.",
+                        workflow_retry_noun(command_failure_code)
+                    )),
                 ),
                 Some(output),
             )
@@ -2366,9 +2386,13 @@ impl PostgresSandboxManager {
     ) -> anyhow::Result<WorkflowEnvelope<ValidateMigrationOutput>> {
         self.validate_schema_change_with_label(
             input,
-            "Schema change validation",
-            "schema-change-validation",
-            "schema change validation",
+            "Migration validation",
+            "migration-validation",
+            "migration validation",
+            "migration_validation_error",
+            "migration_failed",
+            "Migration command",
+            true,
         )
         .await
     }
@@ -2382,6 +2406,10 @@ impl PostgresSandboxManager {
             "Schema change validation",
             "schema-change-validation",
             "schema change validation",
+            "schema_change_validation_error",
+            "repo_command_failed",
+            "Repo command",
+            false,
         )
         .await
     }
@@ -2392,6 +2420,10 @@ impl PostgresSandboxManager {
         label: &'static str,
         detail_type: &'static str,
         default_name_hint: &'static str,
+        validation_error_code: &'static str,
+        command_failure_code: &'static str,
+        command_failure_subject: &'static str,
+        use_migration_missing_code: bool,
     ) -> anyhow::Result<WorkflowEnvelope<ValidateMigrationOutput>> {
         let repo_path = PathBuf::from(&input.repo_path);
         if !repo_path.is_dir() {
@@ -2406,7 +2438,7 @@ impl PostgresSandboxManager {
             Err(error) => {
                 return Ok(workflow_failure(
                     format!("{label} was not run."),
-                    error,
+                    migration_alias_command_error(error, use_migration_missing_code),
                     None,
                 ))
             }
@@ -2473,14 +2505,15 @@ impl PostgresSandboxManager {
                     Ok(_) => Ok(workflow_failure(
                         format!("{label} failed before completion; the created sandbox was deleted."),
                         workflow_error(
-                            "schema_change_validation_error",
+                            validation_error_code,
                             error.to_string(),
                             Some("Retry after fixing the validation error. No sandbox cleanup is required.".to_string()),
                         ),
                         None,
                     )),
-                    Err(cleanup_error) => Err(anyhow::anyhow!(
-                        "schema change validation failed and cleanup also failed for {}: {error}; cleanup error: {cleanup_error}",
+                Err(cleanup_error) => Err(anyhow::anyhow!(
+                        "{} failed and cleanup also failed for {}: {error}; cleanup error: {cleanup_error}",
+                        default_name_hint,
                         connection.database_name
                     )),
                 };
@@ -2523,7 +2556,8 @@ impl PostgresSandboxManager {
                 Ok(_) => true,
                 Err(cleanup_error) => {
                     return Err(anyhow::anyhow!(
-                        "schema change validation failed and cleanup also failed for {}: cleanup error: {cleanup_error}",
+                        "{} failed and cleanup also failed for {}: cleanup error: {cleanup_error}",
+                        default_name_hint,
                         connection.database_name
                     ))
                 }
@@ -2540,11 +2574,15 @@ impl PostgresSandboxManager {
             },
             diff.changed_objects,
             workflow_error(
-                "repo_command_failed",
-                format!("Repo command exited with {:?}", output.exit_code),
+                command_failure_code,
+                format!("{command_failure_subject} exited with {:?}", output.exit_code),
                 Some(
                     if deleted_auto_sandbox {
-                        "Inspect stderr/stdout and rerun after fixing the command. No sandbox cleanup is required."
+                        if command_failure_code == "migration_failed" {
+                            "Inspect stderr/stdout and rerun after fixing the migration. No sandbox cleanup is required."
+                        } else {
+                            "Inspect stderr/stdout and rerun after fixing the command. No sandbox cleanup is required."
+                        }
                     } else {
                         "Inspect stderr/stdout in the result and the schema diff before retrying."
                     }
@@ -3205,6 +3243,32 @@ fn workflow_error_category(code: &str) -> &'static str {
             "workflow"
         }
         _ => "workflow",
+    }
+}
+
+fn migration_alias_command_error(
+    error: WorkflowError,
+    use_migration_missing_code: bool,
+) -> WorkflowError {
+    if use_migration_missing_code && error.code == "missing_schema_change_command" {
+        workflow_error(
+            "missing_migration_command",
+            "No migration command was provided and .pgsandbox/project.json is missing.",
+            Some(
+                "Pass an explicit migration command argv array, or run prepare_for_repo with migrationCommand."
+                    .to_string(),
+            ),
+        )
+    } else {
+        error
+    }
+}
+
+fn workflow_retry_noun(command_failure_code: &str) -> &'static str {
+    if command_failure_code == "migration_failed" {
+        "migration"
+    } else {
+        "command"
     }
 }
 
@@ -7045,6 +7109,20 @@ mod tests {
         assert_eq!(migration_command.category, "command_failed");
         assert_eq!(validation.category, "validation");
         assert_eq!(unsafe_command.category, "validation");
+    }
+
+    #[test]
+    fn migration_aliases_preserve_legacy_missing_command_code() {
+        let generic = workflow_error("missing_schema_change_command", "missing", None);
+
+        let alias = migration_alias_command_error(generic.clone(), true);
+        let non_alias = migration_alias_command_error(generic, false);
+
+        assert_eq!(alias.code, "missing_migration_command");
+        assert_eq!(alias.category, "validation");
+        assert_eq!(non_alias.code, "missing_schema_change_command");
+        assert_eq!(workflow_retry_noun("migration_failed"), "migration");
+        assert_eq!(workflow_retry_noun("repo_command_failed"), "command");
     }
 
     #[test]
