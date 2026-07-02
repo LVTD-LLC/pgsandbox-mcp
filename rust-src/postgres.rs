@@ -202,6 +202,8 @@ pub struct PrepareForRepoInput {
     pub postgres_version: Option<String>,
     pub database_id: Option<String>,
     pub database_name: Option<String>,
+    pub migration_command: Option<Vec<String>>,
+    pub seed_command: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -707,11 +709,12 @@ pub struct SchemaSnapshotSummary {
 #[serde(rename_all = "camelCase")]
 pub struct PrepareForRepoOutput {
     pub repo_path: String,
-    pub detected_framework: Option<String>,
     pub postgres_version: Option<String>,
     pub postgres_version_source: Option<String>,
     pub config_path: Option<String>,
     pub sandbox_target: Option<String>,
+    pub migration_command_configured: bool,
+    pub seed_command_configured: bool,
     pub action_needed: Option<String>,
 }
 
@@ -810,11 +813,13 @@ struct QueryExecutionResult {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RepoProjectConfig {
-    framework: String,
-    migration_command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    migration_command: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     seed_command: Option<Vec<String>>,
+    #[serde(default = "default_database_url_env")]
     database_url_env: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     postgres_version: Option<String>,
     prepared_at: DateTime<Utc>,
 }
@@ -2084,9 +2089,27 @@ impl PostgresSandboxManager {
             ));
         }
 
+        if let Some(command) = &input.migration_command {
+            if let Err(error) = validate_workflow_command(command, "Migration command") {
+                return Ok(workflow_failure(
+                    "Repository was not prepared.",
+                    error,
+                    None,
+                ));
+            }
+        }
+        if let Some(command) = &input.seed_command {
+            if let Err(error) = validate_workflow_command(command, "Seed command") {
+                return Ok(workflow_failure(
+                    "Repository was not prepared.",
+                    error,
+                    None,
+                ));
+            }
+        }
+
         let postgres_version =
             resolve_repo_postgres_version(&repo_path, input.postgres_version.clone())?;
-        let detection = detect_django_repo(&repo_path)?;
         let sandbox_target = if selector_has_database(&input.database_id, &input.database_name) {
             let connection = self
                 .get_connection_string(DatabaseSelector {
@@ -2101,52 +2124,52 @@ impl PostgresSandboxManager {
             None
         };
 
-        if !detection {
-            return Ok(workflow_failure(
-                "Repository detection needs an explicit adapter.",
-                workflow_error(
-                    "repo_detection_uncertain",
-                    "Could not confidently detect a Django repo from manage.py and settings patterns.",
-                    Some("Pass explicit commands to run_migrations/seed_database or add Django project files.".to_string()),
-                ),
-                Some(PrepareForRepoOutput {
-                    repo_path: repo_path.display().to_string(),
-                    detected_framework: None,
-                    postgres_version: postgres_version.version.clone(),
-                    postgres_version_source: postgres_version.source.clone(),
-                    config_path: None,
-                    sandbox_target,
-                    action_needed: Some("Add manage.py plus a Django settings module, or provide explicit commands to the workflow tools.".to_string()),
-                }),
-            ));
-        }
-
+        let existing_project_config = read_repo_project_config(&repo_path)?;
+        let migration_command = input.migration_command.or_else(|| {
+            existing_project_config
+                .as_ref()
+                .and_then(|config| config.migration_command.clone())
+        });
+        let seed_command = input.seed_command.or_else(|| {
+            existing_project_config
+                .as_ref()
+                .and_then(|config| config.seed_command.clone())
+        });
+        let database_url_env = existing_project_config
+            .as_ref()
+            .map(|config| config.database_url_env.clone())
+            .unwrap_or_else(default_database_url_env);
         let project_config = RepoProjectConfig {
-            framework: "django".to_string(),
-            migration_command: default_django_migration_command(),
-            seed_command: None,
-            database_url_env: "DATABASE_URL".to_string(),
+            migration_command,
+            seed_command,
+            database_url_env,
             postgres_version: postgres_version.version.clone(),
             prepared_at: Utc::now(),
         };
+        let migration_command_configured = project_config.migration_command.is_some();
+        let seed_command_configured = project_config.seed_command.is_some();
         let config_path = write_repo_project_config(&repo_path, &project_config)?;
+        let action_needed = (!migration_command_configured).then(|| {
+            "Pass an explicit command to run_migrations/validate_migration or add migrationCommand to .pgsandbox/project.json.".to_string()
+        });
         let output = PrepareForRepoOutput {
             repo_path: repo_path.display().to_string(),
-            detected_framework: Some("django".to_string()),
             postgres_version: postgres_version.version,
             postgres_version_source: postgres_version.source,
             config_path: Some(config_path.display().to_string()),
             sandbox_target,
-            action_needed: None,
+            migration_command_configured,
+            seed_command_configured,
+            action_needed,
         };
+        let warnings = output.action_needed.iter().cloned().collect::<Vec<_>>();
 
         Ok(workflow_success(
-            "Django repository prepared for PG Sandbox workflows.",
+            "Repository prepared for PG Sandbox workflows.",
             None,
-            Vec::new(),
+            warnings,
             vec![json!({
-                "type": "repo-config",
-                "framework": "django"
+                "type": "repo-config"
             })],
             output,
         ))
@@ -2261,7 +2284,7 @@ impl PostgresSandboxManager {
                     name_hint: Some(
                         input
                             .name_hint
-                            .unwrap_or_else(|| "django migration validation".to_string()),
+                            .unwrap_or_else(|| "migration validation".to_string()),
                     ),
                     ttl_minutes: input.ttl_minutes,
                     owner: input.owner,
@@ -3029,7 +3052,7 @@ fn workflow_error_category(code: &str) -> &'static str {
         "template_restore_failed" => "restore_failed",
         "missing_migration_command"
         | "missing_seed_command"
-        | "unsafe_migration_command"
+        | "unsafe_command"
         | "unclear_command"
         | "invalid_artifact_name"
         | "repo_not_found" => "validation",
@@ -3523,32 +3546,8 @@ fn clone_downgrade_error(source_major: &str, target_major: &str) -> Option<Strin
     })
 }
 
-fn default_django_migration_command() -> Vec<String> {
-    vec![
-        "python".to_string(),
-        "manage.py".to_string(),
-        "migrate".to_string(),
-        "--noinput".to_string(),
-    ]
-}
-
-fn detect_django_repo(repo_path: &Path) -> anyhow::Result<bool> {
-    let manage_py = repo_path.join("manage.py");
-    if !manage_py.is_file() {
-        return Ok(false);
-    }
-    let manage_text = fs::read_to_string(&manage_py).unwrap_or_default();
-    if manage_text.contains("DJANGO_SETTINGS_MODULE") {
-        return Ok(true);
-    }
-    for entry in fs::read_dir(repo_path)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() && path.join("settings.py").is_file() {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+fn default_database_url_env() -> String {
+    "DATABASE_URL".to_string()
 }
 
 fn infer_repo_postgres_version(
@@ -3787,32 +3786,30 @@ fn resolve_migration_command(
     let command = match input_command {
         Some(command) => command,
         None => match read_repo_project_config(repo_path)? {
-            Some(config) => config.migration_command,
+            Some(config) => match config.migration_command {
+                Some(command) => command,
+                None => {
+                    return Ok(Err(workflow_error(
+                        "missing_migration_command",
+                        ".pgsandbox/project.json has no migrationCommand.",
+                        Some("Pass an explicit migration command argv array or add migrationCommand to the project config.".to_string()),
+                    )))
+                }
+            },
             None => {
                 return Ok(Err(workflow_error(
                     "missing_migration_command",
                     "No migration command was provided and .pgsandbox/project.json is missing.",
                     Some(
-                        "Run prepare_for_repo or pass an explicit Django migrate command."
+                        "Pass an explicit migration command argv array, or run prepare_for_repo with migrationCommand."
                             .to_string(),
                     ),
                 )))
             }
         },
     };
-    if !command_is_bounded(&command) {
-        return Ok(Err(workflow_error(
-            "unclear_command",
-            "Migration command is empty or too large.",
-            Some("Pass a short argv array such as [\"python\", \"manage.py\", \"migrate\", \"--noinput\"].".to_string()),
-        )));
-    }
-    if !is_known_django_migration_command(&command) {
-        return Ok(Err(workflow_error(
-            "unsafe_migration_command",
-            "Only explicit Django migrate commands are allowed for run_migrations and validate_migration.",
-            Some("Use python manage.py migrate --noinput, or configure that command in .pgsandbox/project.json.".to_string()),
-        )));
+    if let Err(error) = validate_workflow_command(&command, "Migration command") {
+        return Ok(Err(error));
     }
     Ok(Ok(command))
 }
@@ -3843,14 +3840,31 @@ fn resolve_seed_command(
             }
         },
     };
-    if !command_is_bounded(&command) {
-        return Ok(Err(workflow_error(
-            "unclear_command",
-            "Seed command is empty or too large.",
-            Some("Pass a short argv array. Commands are executed without a shell.".to_string()),
-        )));
+    if let Err(error) = validate_workflow_command(&command, "Seed command") {
+        return Ok(Err(error));
     }
     Ok(Ok(command))
+}
+
+fn validate_workflow_command(command: &[String], label: &str) -> Result<(), WorkflowError> {
+    if !command_is_bounded(command) {
+        return Err(workflow_error(
+            "unclear_command",
+            format!("{label} is empty or too large."),
+            Some(
+                "Pass a short argv array. Commands are executed without shell expansion."
+                    .to_string(),
+            ),
+        ));
+    }
+    if command_invokes_shell(command) {
+        return Err(workflow_error(
+            "unsafe_command",
+            format!("{label} cannot invoke a shell or command launcher."),
+            Some("Pass the executable and arguments directly, for example [\"npm\", \"run\", \"migrate\"] or [\"alembic\", \"upgrade\", \"head\"].".to_string()),
+        ));
+    }
+    Ok(())
 }
 
 fn command_is_bounded(command: &[String]) -> bool {
@@ -3868,48 +3882,60 @@ fn command_is_bounded(command: &[String]) -> bool {
         })
 }
 
-fn is_known_django_migration_command(command: &[String]) -> bool {
-    if command.len() < 3 {
-        return false;
-    }
-    let (manage_index, migrate_index) = if command[0] == "manage.py" || command[0] == "./manage.py"
-    {
-        (0, 1)
-    } else if is_python_command(&command[0])
-        && command.get(1).map(String::as_str) == Some("manage.py")
-    {
-        (1, 2)
-    } else {
-        return false;
-    };
-    if command.get(manage_index).map(String::as_str) != Some("manage.py")
-        && command.get(manage_index).map(String::as_str) != Some("./manage.py")
-    {
-        return false;
-    }
-    if command.get(migrate_index).map(String::as_str) != Some("migrate") {
-        return false;
-    }
-    command[migrate_index + 1..].iter().all(|arg| {
-        !arg.contains(';')
-            && !arg.contains('&')
-            && !arg.contains('|')
-            && !arg.contains('>')
-            && !arg.contains('<')
-            && !arg.starts_with("--database")
-    })
+fn command_invokes_shell(command: &[String]) -> bool {
+    command.iter().any(|part| command_part_is_shell(part))
+        || command
+            .first()
+            .is_some_and(|program| command_part_is_indirect_launcher(program))
 }
 
-fn is_python_command(command: &str) -> bool {
-    let executable = Path::new(command)
+fn command_part_executable_name(part: &str) -> String {
+    Path::new(part)
         .file_name()
         .and_then(|value| value.to_str())
-        .unwrap_or(command);
-    executable == "python"
-        || executable == "python3"
-        || executable
-            .strip_prefix("python3.")
-            .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+        .unwrap_or(part)
+        .to_ascii_lowercase()
+}
+
+fn command_part_is_shell(part: &str) -> bool {
+    let executable = command_part_executable_name(part);
+    matches!(
+        executable.as_str(),
+        "sh" | "bash"
+            | "dash"
+            | "zsh"
+            | "fish"
+            | "ksh"
+            | "csh"
+            | "tcsh"
+            | "cmd"
+            | "cmd.exe"
+            | "powershell"
+            | "powershell.exe"
+            | "pwsh"
+            | "pwsh.exe"
+    )
+}
+
+fn command_part_is_indirect_launcher(part: &str) -> bool {
+    let executable = command_part_executable_name(part);
+    matches!(
+        executable.as_str(),
+        "env"
+            | "sudo"
+            | "sudoedit"
+            | "doas"
+            | "su"
+            | "runuser"
+            | "xargs"
+            | "nsenter"
+            | "unshare"
+            | "chroot"
+            | "setsid"
+            | "nohup"
+            | "nice"
+            | "stdbuf"
+    )
 }
 
 fn workflow_timeout(timeout_seconds: Option<u64>) -> StdDuration {
@@ -6758,7 +6784,7 @@ mod tests {
     fn workflow_errors_include_agent_branching_category() {
         let template = workflow_error("template_not_found", "missing", None);
         let command = workflow_error("migration_failed", "failed", None);
-        let validation = workflow_error("unsafe_migration_command", "unsafe", None);
+        let validation = workflow_error("unsafe_command", "unsafe", None);
 
         assert_eq!(template.category, "template_not_found");
         assert_eq!(command.category, "command_failed");
@@ -7023,8 +7049,8 @@ mod tests {
     #[test]
     fn validates_artifact_names_for_local_files() {
         assert_eq!(
-            validate_artifact_name("django_seed.v1", "templateName").unwrap(),
-            "django_seed.v1"
+            validate_artifact_name("seeded_state.v1", "templateName").unwrap(),
+            "seeded_state.v1"
         );
         assert!(validate_artifact_name("../prod", "templateName").is_err());
         assert!(validate_artifact_name("nested/name", "templateName").is_err());
@@ -7045,21 +7071,21 @@ mod tests {
     }
 
     #[test]
-    fn detects_django_repo_and_writes_secret_free_project_config() {
+    fn writes_generic_secret_free_project_config() {
         let directory = tempfile::tempdir().unwrap();
         let repo = directory.path();
-        std::fs::write(
-            repo.join("manage.py"),
-            "import os\nos.environ.setdefault('DJANGO_SETTINGS_MODULE', 'app.settings')\n",
-        )
-        .unwrap();
-
-        assert!(detect_django_repo(repo).unwrap());
 
         let config = RepoProjectConfig {
-            framework: "django".to_string(),
-            migration_command: default_django_migration_command(),
-            seed_command: None,
+            migration_command: Some(vec![
+                "npm".to_string(),
+                "run".to_string(),
+                "migrate".to_string(),
+            ]),
+            seed_command: Some(vec![
+                "npm".to_string(),
+                "run".to_string(),
+                "seed".to_string(),
+            ]),
             database_url_env: "DATABASE_URL".to_string(),
             postgres_version: None,
             prepared_at: Utc::now(),
@@ -7067,10 +7093,60 @@ mod tests {
         let path = write_repo_project_config(repo, &config).unwrap();
         let raw = std::fs::read_to_string(path).unwrap();
 
-        assert!(raw.contains("\"framework\": \"django\""));
-        assert!(raw.contains("\"manage.py\""));
+        assert!(!raw.contains("\"framework\""));
+        assert!(raw.contains("\"migrationCommand\""));
+        assert!(raw.contains("\"npm\""));
         assert!(!raw.contains("postgres://"));
         assert!(!raw.contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn prepare_for_repo_preserves_existing_commands_when_updating_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let repo = directory.path();
+        let config = RepoProjectConfig {
+            migration_command: Some(vec![
+                "npm".to_string(),
+                "run".to_string(),
+                "migrate".to_string(),
+            ]),
+            seed_command: Some(vec![
+                "npm".to_string(),
+                "run".to_string(),
+                "seed".to_string(),
+            ]),
+            database_url_env: "DATABASE_URL".to_string(),
+            postgres_version: Some("16".to_string()),
+            prepared_at: Utc::now(),
+        };
+        write_repo_project_config(repo, &config).unwrap();
+        let manager = PostgresSandboxManager::new(test_config());
+
+        let output = manager
+            .prepare_for_repo(PrepareForRepoInput {
+                repo_path: repo.display().to_string(),
+                profile: None,
+                postgres_version: Some("17".to_string()),
+                database_id: None,
+                database_name: None,
+                migration_command: None,
+                seed_command: None,
+            })
+            .await
+            .unwrap();
+        let updated = read_repo_project_config(repo).unwrap().unwrap();
+
+        assert!(output.ok);
+        assert!(output.result.unwrap().migration_command_configured);
+        assert_eq!(updated.postgres_version.as_deref(), Some("17"));
+        assert_eq!(
+            updated.migration_command.as_deref(),
+            Some(["npm".to_string(), "run".to_string(), "migrate".to_string()].as_slice())
+        );
+        assert_eq!(
+            updated.seed_command.as_deref(),
+            Some(["npm".to_string(), "run".to_string(), "seed".to_string()].as_slice())
+        );
     }
 
     #[test]
@@ -7176,8 +7252,11 @@ services:
         let directory = tempfile::tempdir().unwrap();
         let repo = directory.path();
         let config = RepoProjectConfig {
-            framework: "django".to_string(),
-            migration_command: default_django_migration_command(),
+            migration_command: Some(vec![
+                "npm".to_string(),
+                "run".to_string(),
+                "migrate".to_string(),
+            ]),
             seed_command: None,
             database_url_env: "DATABASE_URL".to_string(),
             postgres_version: Some("16".to_string()),
@@ -7198,17 +7277,16 @@ services:
     }
 
     #[test]
-    fn migration_commands_are_limited_to_django_migrate() {
+    fn migration_commands_are_generic_bounded_non_shell_argv() {
         let directory = tempfile::tempdir().unwrap();
         let repo = directory.path();
 
         assert!(resolve_migration_command(
             repo,
             Some(vec![
-                "python".to_string(),
-                "manage.py".to_string(),
+                "npm".to_string(),
+                "run".to_string(),
                 "migrate".to_string(),
-                "--noinput".to_string(),
             ]),
         )
         .unwrap()
@@ -7219,63 +7297,93 @@ services:
             Some(vec![
                 "bash".to_string(),
                 "-lc".to_string(),
-                "python manage.py migrate".to_string(),
+                "npm run migrate".to_string(),
             ]),
         )
         .unwrap()
         .unwrap_err();
-        assert_eq!(shell.code, "unsafe_migration_command");
+        assert_eq!(shell.code, "unsafe_command");
 
-        let shell_management_command = resolve_migration_command(
+        let env_shell = resolve_migration_command(
             repo,
             Some(vec![
-                "python".to_string(),
-                "manage.py".to_string(),
-                "shell".to_string(),
+                "env".to_string(),
+                "bash".to_string(),
+                "-c".to_string(),
+                "npm run migrate".to_string(),
             ]),
         )
         .unwrap()
         .unwrap_err();
-        assert_eq!(shell_management_command.code, "unsafe_migration_command");
+        assert_eq!(env_shell.code, "unsafe_command");
 
-        let fake_python = resolve_migration_command(
+        let sudo_shell = resolve_migration_command(
             repo,
             Some(vec![
-                "python-malicious".to_string(),
-                "manage.py".to_string(),
+                "sudo".to_string(),
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "npm run migrate".to_string(),
+            ]),
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(sudo_shell.code, "unsafe_command");
+
+        let launcher_without_shell = resolve_migration_command(
+            repo,
+            Some(vec![
+                "nsenter".to_string(),
+                "--target".to_string(),
+                "1".to_string(),
+                "npm".to_string(),
+                "run".to_string(),
                 "migrate".to_string(),
             ]),
         )
         .unwrap()
         .unwrap_err();
-        assert_eq!(fake_python.code, "unsafe_migration_command");
+        assert_eq!(launcher_without_shell.code, "unsafe_command");
 
-        let alternate_database = resolve_migration_command(
+        let alembic = resolve_migration_command(
             repo,
             Some(vec![
-                "python".to_string(),
-                "manage.py".to_string(),
-                "migrate".to_string(),
-                "--database=default".to_string(),
-            ]),
-        )
-        .unwrap()
-        .unwrap_err();
-        assert_eq!(alternate_database.code, "unsafe_migration_command");
-
-        let custom_settings = resolve_migration_command(
-            repo,
-            Some(vec![
-                "python".to_string(),
-                "manage.py".to_string(),
-                "migrate".to_string(),
-                "--settings=myapp.settings.ci".to_string(),
-                "--pythonpath".to_string(),
-                "src".to_string(),
+                "alembic".to_string(),
+                "upgrade".to_string(),
+                "head".to_string(),
             ]),
         )
         .unwrap();
-        assert!(custom_settings.is_ok());
+        assert!(alembic.is_ok());
+
+        let prisma = resolve_migration_command(
+            repo,
+            Some(vec![
+                "npx".to_string(),
+                "prisma".to_string(),
+                "migrate".to_string(),
+                "deploy".to_string(),
+            ]),
+        )
+        .unwrap();
+        assert!(prisma.is_ok());
+
+        let rails = resolve_migration_command(
+            repo,
+            Some(vec![
+                "bundle".to_string(),
+                "exec".to_string(),
+                "rails".to_string(),
+                "db:migrate".to_string(),
+            ]),
+        )
+        .unwrap();
+        assert!(rails.is_ok());
+
+        let empty = resolve_migration_command(repo, Some(Vec::new()))
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(empty.code, "unclear_command");
     }
 
     #[test]
@@ -7289,10 +7397,9 @@ services:
         let explicit = resolve_seed_command(
             repo,
             Some(vec![
-                "python".to_string(),
-                "manage.py".to_string(),
-                "loaddata".to_string(),
-                "fixture.json".to_string(),
+                "npm".to_string(),
+                "run".to_string(),
+                "seed".to_string(),
             ]),
         )
         .unwrap();

@@ -356,7 +356,7 @@ impl PgsandboxServer {
         .await
     }
 
-    #[tool(description = "Detect a Django repo and write a secret-free PG Sandbox project config.")]
+    #[tool(description = "Prepare generic repo workflow metadata for PG Sandbox.")]
     async fn prepare_for_repo(
         &self,
         Parameters(input): Parameters<PrepareForRepoInput>,
@@ -374,7 +374,7 @@ impl PgsandboxServer {
         .await
     }
 
-    #[tool(description = "Run an explicit Django migration command against a sandbox database.")]
+    #[tool(description = "Run an explicit migration command against a sandbox database.")]
     async fn run_migrations(
         &self,
         Parameters(input): Parameters<RunMigrationsInput>,
@@ -394,7 +394,9 @@ impl PgsandboxServer {
         .await
     }
 
-    #[tool(description = "Run Django migrations in a sandbox and return before/after schema diff.")]
+    #[tool(
+        description = "Run a migration command in a sandbox and return before/after schema diff."
+    )]
     async fn validate_migration(
         &self,
         Parameters(input): Parameters<ValidateMigrationInput>,

@@ -440,15 +440,17 @@ baselines, and drift detection. The reusable seeded-state family is
 
 ## Agent Workflows
 
-For a Django repo, an agent can:
+For repo-backed database work, an agent can:
 
 1. Create or select a sandbox with `create_database`.
-2. Call `prepare_for_repo` with the repo path. This writes a secret-free
-   `.pgsandbox/project.json` when Django is detected. If the repo has a
-   `postgres:<major>` or compatible Compose/devcontainer image, PGSandbox records
-   that version for later workflow calls.
-3. Call `validate_migration` to run `python manage.py migrate --noinput`
-   against the sandbox and receive a before/after schema diff.
+2. Optionally call `prepare_for_repo` with the repo path and explicit
+   `migrationCommand` or `seedCommand` argv arrays. This writes a secret-free
+   `.pgsandbox/project.json`. If the repo has a `postgres:<major>` or compatible
+   Compose/devcontainer image, PGSandbox records that version for later workflow
+   calls.
+3. Call `validate_migration` with an explicit command or configured
+   `migrationCommand` to run the repo's migration workflow against the sandbox
+   and receive a before/after schema diff.
 4. Optionally call `seed_database` with an explicit seed command.
 5. Save reusable state with `create_schema_snapshot` or
    `create_template_from_sandbox`.
