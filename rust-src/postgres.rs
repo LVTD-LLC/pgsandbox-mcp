@@ -851,6 +851,17 @@ struct RepoPostgresVersionResolution {
     source: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ValidateSchemaChangeWorkflow {
+    label: &'static str,
+    detail_type: &'static str,
+    default_name_hint: &'static str,
+    validation_error_code: &'static str,
+    command_failure_code: &'static str,
+    command_failure_subject: &'static str,
+    use_migration_missing_code: bool,
+}
+
 #[derive(Debug)]
 struct CommandRunResult {
     command: Vec<String>,
@@ -2386,13 +2397,15 @@ impl PostgresSandboxManager {
     ) -> anyhow::Result<WorkflowEnvelope<ValidateMigrationOutput>> {
         self.validate_schema_change_with_label(
             input,
-            "Migration validation",
-            "migration-validation",
-            "migration validation",
-            "migration_validation_error",
-            "migration_failed",
-            "Migration command",
-            true,
+            ValidateSchemaChangeWorkflow {
+                label: "Migration validation",
+                detail_type: "migration-validation",
+                default_name_hint: "migration validation",
+                validation_error_code: "migration_validation_error",
+                command_failure_code: "migration_failed",
+                command_failure_subject: "Migration command",
+                use_migration_missing_code: true,
+            },
         )
         .await
     }
@@ -2403,13 +2416,15 @@ impl PostgresSandboxManager {
     ) -> anyhow::Result<WorkflowEnvelope<ValidateMigrationOutput>> {
         self.validate_schema_change_with_label(
             input,
-            "Schema change validation",
-            "schema-change-validation",
-            "schema change validation",
-            "schema_change_validation_error",
-            "repo_command_failed",
-            "Repo command",
-            false,
+            ValidateSchemaChangeWorkflow {
+                label: "Schema change validation",
+                detail_type: "schema-change-validation",
+                default_name_hint: "schema change validation",
+                validation_error_code: "schema_change_validation_error",
+                command_failure_code: "repo_command_failed",
+                command_failure_subject: "Repo command",
+                use_migration_missing_code: false,
+            },
         )
         .await
     }
@@ -2417,18 +2432,12 @@ impl PostgresSandboxManager {
     async fn validate_schema_change_with_label(
         &self,
         input: ValidateMigrationInput,
-        label: &'static str,
-        detail_type: &'static str,
-        default_name_hint: &'static str,
-        validation_error_code: &'static str,
-        command_failure_code: &'static str,
-        command_failure_subject: &'static str,
-        use_migration_missing_code: bool,
+        workflow: ValidateSchemaChangeWorkflow,
     ) -> anyhow::Result<WorkflowEnvelope<ValidateMigrationOutput>> {
         let repo_path = PathBuf::from(&input.repo_path);
         if !repo_path.is_dir() {
             return Ok(workflow_failure(
-                format!("{label} was not run."),
+                format!("{} was not run.", workflow.label),
                 repo_not_found_error(&repo_path),
                 None,
             ));
@@ -2437,8 +2446,8 @@ impl PostgresSandboxManager {
             Ok(command) => command,
             Err(error) => {
                 return Ok(workflow_failure(
-                    format!("{label} was not run."),
-                    migration_alias_command_error(error, use_migration_missing_code),
+                    format!("{} was not run.", workflow.label),
+                    migration_alias_command_error(error, workflow.use_migration_missing_code),
                     None,
                 ))
             }
@@ -2456,7 +2465,7 @@ impl PostgresSandboxManager {
                     name_hint: Some(
                         input
                             .name_hint
-                            .unwrap_or_else(|| default_name_hint.to_string()),
+                            .unwrap_or_else(|| workflow.default_name_hint.to_string()),
                     ),
                     ttl_minutes: input.ttl_minutes,
                     owner: input.owner,
@@ -2503,17 +2512,17 @@ impl PostgresSandboxManager {
                     .await;
                 return match cleanup {
                     Ok(_) => Ok(workflow_failure(
-                        format!("{label} failed before completion; the created sandbox was deleted."),
+                        format!("{} failed before completion; the created sandbox was deleted.", workflow.label),
                         workflow_error(
-                            validation_error_code,
+                            workflow.validation_error_code,
                             error.to_string(),
                             Some("Retry after fixing the validation error. No sandbox cleanup is required.".to_string()),
                         ),
                         None,
                     )),
-                Err(cleanup_error) => Err(anyhow::anyhow!(
+                    Err(cleanup_error) => Err(anyhow::anyhow!(
                         "{} failed and cleanup also failed for {}: {error}; cleanup error: {cleanup_error}",
-                        default_name_hint,
+                        workflow.default_name_hint,
                         connection.database_name
                     )),
                 };
@@ -2531,11 +2540,11 @@ impl PostgresSandboxManager {
 
         if ok {
             return Ok(workflow_success(
-                format!("{label} completed successfully."),
+                format!("{} completed successfully.", workflow.label),
                 Some(diff.changed_objects),
                 Vec::new(),
                 vec![json!({
-                    "type": detail_type,
+                    "type": workflow.detail_type,
                     "databaseId": connection.database_id,
                     "createdSandbox": created_sandbox
                 })],
@@ -2557,7 +2566,7 @@ impl PostgresSandboxManager {
                 Err(cleanup_error) => {
                     return Err(anyhow::anyhow!(
                         "{} failed and cleanup also failed for {}: cleanup error: {cleanup_error}",
-                        default_name_hint,
+                        workflow.default_name_hint,
                         connection.database_name
                     ))
                 }
@@ -2568,17 +2577,20 @@ impl PostgresSandboxManager {
 
         Ok(workflow_failure_with_changes(
             if deleted_auto_sandbox {
-                format!("{label} failed; the created sandbox was deleted.")
+                format!("{} failed; the created sandbox was deleted.", workflow.label)
             } else {
-                format!("{label} failed.")
+                format!("{} failed.", workflow.label)
             },
             diff.changed_objects,
             workflow_error(
-                command_failure_code,
-                format!("{command_failure_subject} exited with {:?}", output.exit_code),
+                workflow.command_failure_code,
+                format!(
+                    "{} exited with {:?}",
+                    workflow.command_failure_subject, output.exit_code
+                ),
                 Some(
                     if deleted_auto_sandbox {
-                        if command_failure_code == "migration_failed" {
+                        if workflow.command_failure_code == "migration_failed" {
                             "Inspect stderr/stdout and rerun after fixing the migration. No sandbox cleanup is required."
                         } else {
                             "Inspect stderr/stdout and rerun after fixing the command. No sandbox cleanup is required."
