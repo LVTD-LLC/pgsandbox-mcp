@@ -368,7 +368,7 @@ Inputs:
 
 Deletes the local snapshot artifact.
 
-## Django Workflow Tools
+## Repo Workflow Tools
 
 These tools are repo-aware but conservative. They do not rewrite application
 settings permanently and they run commands without a shell. Database access is
@@ -377,10 +377,9 @@ injected through `DATABASE_URL`, `PGSANDBOX_DATABASE_URL`, and libpq-style
 
 ### `prepare_for_repo`
 
-Detects a Django repo from `manage.py` and settings patterns, then writes a
-secret-free `.pgsandbox/project.json` with a default Django migration command.
-If detection is uncertain, the tool returns `ok: false` with an action-needed
-message instead of guessing. If `postgresVersion` is omitted, PGSandbox checks
+Writes a secret-free `.pgsandbox/project.json` with generic workflow metadata
+and optional explicit command argv arrays. It does not detect or assume an
+application framework. If `postgresVersion` is omitted, PGSandbox checks
 existing `.pgsandbox/project.json`, then Compose/devcontainer image references
 such as `postgres:16` or `postgis/postgis:16-3.4`, and records the inferred
 version when found.
@@ -391,10 +390,12 @@ Inputs:
 - `profile`: optional Postgres profile name
 - `postgresVersion`: optional Postgres major version
 - `databaseId` or `databaseName`: optional sandbox to report as the masked target
+- `migrationCommand`: optional argv array for the repo migration workflow
+- `seedCommand`: optional argv array for the repo seed workflow
 
 ### `run_migrations`
 
-Runs only an explicit Django `migrate` command against a selected sandbox.
+Runs an explicit or configured migration command against a selected sandbox.
 
 Inputs:
 
@@ -408,7 +409,7 @@ Inputs:
 
 ### `validate_migration`
 
-Captures a before schema digest, runs the Django migration command against a
+Captures a before schema digest, runs the migration command against a
 fresh or selected sandbox, captures the after digest, and returns a compact
 schema diff plus bounded command output.
 
