@@ -52,6 +52,8 @@ const SCHEMA_DIGEST_VERSION: u32 = 2;
 const MAX_SCHEMA_DIFF_ITEMS: usize = 50;
 const DEFAULT_WORKFLOW_TIMEOUT_SECONDS: u64 = 120;
 const MAX_WORKFLOW_TIMEOUT_SECONDS: u64 = 600;
+const DEFAULT_SCHEMA_OPERATION_TIMEOUT_SECONDS: u64 = 30;
+const CONNECTION_TASK_CLOSE_TIMEOUT_SECONDS: u64 = 2;
 const MAX_COMMAND_OUTPUT_BYTES: usize = 8_000;
 const TEMPLATE_PRIVACY_WARNING: &str =
     "Templates are local PG Sandbox artifacts. Do not create templates from production or sensitive data unless you have explicitly sanitized it.";
@@ -141,6 +143,9 @@ pub struct SchemaDiffInput {
     pub postgres_version: Option<String>,
     pub database_id: Option<String>,
     pub database_name: Option<String>,
+    #[schemars(
+        description = "Full schema_digest response object, or a JSON string containing that full object. A checksum string alone is not enough to compute a diff; use schema snapshots for compact stored baselines."
+    )]
     pub base_digest: SchemaDiffBaseDigest,
 }
 
@@ -208,7 +213,7 @@ pub struct PrepareForRepoInput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct RunMigrationsInput {
+pub struct RunRepoCommandInput {
     pub repo_path: String,
     pub profile: Option<String>,
     pub postgres_version: Option<String>,
@@ -220,7 +225,7 @@ pub struct RunMigrationsInput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ValidateMigrationInput {
+pub struct ValidateSchemaChangeInput {
     pub repo_path: String,
     pub profile: Option<String>,
     pub postgres_version: Option<String>,
@@ -334,6 +339,7 @@ pub struct CreateDatabaseOutput {
     pub role_name: String,
     pub expires_at: DateTime<Utc>,
     pub connection_string: String,
+    pub connection_string_redacted: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -345,6 +351,7 @@ pub struct CloneDatabaseOutput {
     pub role_name: String,
     pub expires_at: DateTime<Utc>,
     pub connection_string: String,
+    pub connection_string_redacted: String,
     pub source: String,
     pub schema_only: bool,
 }
@@ -364,6 +371,7 @@ pub struct ConnectionStringOutput {
     pub database_name: String,
     pub expires_at: DateTime<Utc>,
     pub connection_string: String,
+    pub connection_string_redacted: String,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -372,6 +380,9 @@ pub struct RunSqlOutput {
     pub database_id: String,
     pub database_name: String,
     pub row_count: Option<u64>,
+    pub returned_row_count: usize,
+    pub affected_row_count: Option<u64>,
+    pub total_row_count_known: bool,
     pub rows: Vec<Value>,
     pub truncated: bool,
     pub elapsed_ms: u128,
@@ -734,7 +745,7 @@ pub struct CommandWorkflowOutput {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ValidateMigrationOutput {
+pub struct ValidateSchemaChangeOutput {
     pub database_id: String,
     pub database_name: String,
     pub created_sandbox: bool,
@@ -779,6 +790,7 @@ pub struct CreateSandboxFromTemplateOutput {
     pub role_name: String,
     pub expires_at: DateTime<Utc>,
     pub connection_string: String,
+    pub connection_string_redacted: String,
     pub template_name: String,
 }
 
@@ -806,6 +818,9 @@ struct SandboxRecord {
 
 struct QueryExecutionResult {
     row_count: Option<u64>,
+    returned_row_count: usize,
+    affected_row_count: Option<u64>,
+    total_row_count_known: bool,
     rows: Vec<Value>,
     truncated: bool,
 }
@@ -1076,6 +1091,16 @@ impl PostgresSandboxManager {
                 .get_owned_record_by_database_id(database_id.unwrap_or_default())
                 .await;
         }
+        if selector_is_unscoped_database_name(
+            profile_name.as_ref(),
+            postgres_version.as_ref(),
+            database_id.as_ref(),
+            database_name.as_ref(),
+        ) {
+            return self
+                .get_owned_record_by_database_name(database_name.unwrap_or_default())
+                .await;
+        }
 
         let profile = self.resolve_profile(profile_name.as_deref(), postgres_version.as_deref())?;
         let (client, connection_task) = connect_admin(&profile).await?;
@@ -1098,6 +1123,28 @@ impl PostgresSandboxManager {
         &self,
         database_id: String,
     ) -> anyhow::Result<(SandboxProfile, SandboxRecord)> {
+        self.get_owned_record_across_profiles("databaseId", database_id, |selector, value| {
+            selector.database_id = Some(value.to_string())
+        })
+        .await
+    }
+
+    async fn get_owned_record_by_database_name(
+        &self,
+        database_name: String,
+    ) -> anyhow::Result<(SandboxProfile, SandboxRecord)> {
+        self.get_owned_record_across_profiles("databaseName", database_name, |selector, value| {
+            selector.database_name = Some(value.to_string())
+        })
+        .await
+    }
+
+    async fn get_owned_record_across_profiles(
+        &self,
+        selector_label: &'static str,
+        selector_value: String,
+        apply_selector: impl Fn(&mut DatabaseSelector, &str) + Copy,
+    ) -> anyhow::Result<(SandboxProfile, SandboxRecord)> {
         let mut matches = Vec::new();
         let mut search_errors = Vec::new();
 
@@ -1106,12 +1153,13 @@ impl PostgresSandboxManager {
             let search = async {
                 let (client, connection_task) = connect_admin(&profile).await?;
                 ensure_metadata_table(&client).await?;
-                let selector = DatabaseSelector {
+                let mut selector = DatabaseSelector {
                     profile: None,
                     postgres_version: None,
-                    database_id: Some(database_id.clone()),
+                    database_id: None,
                     database_name: None,
                 };
+                apply_selector(&mut selector, &selector_value);
                 let record = find_record(&client, &profile.name, &selector).await?;
                 drop(client);
                 let _ = connection_task.await;
@@ -1130,7 +1178,7 @@ impl PostgresSandboxManager {
             1 => Ok(matches.remove(0)),
             0 => {
                 let mut message = format!(
-                    "Database was not found in PGSandbox metadata for databaseId {database_id}. If this sandbox was created under a specific profile or postgresVersion, retry with that profile or postgresVersion, or call list_databases with includeAllVersions=true."
+                    "Database was not found in PGSandbox metadata for {selector_label} {selector_value}. If this sandbox was created under a specific profile or postgresVersion, retry with that profile or postgresVersion, or call list_databases with includeAllVersions=true."
                 );
                 if !search_errors.is_empty() {
                     let summarized = search_errors
@@ -1150,7 +1198,7 @@ impl PostgresSandboxManager {
                     .collect::<Vec<_>>()
                     .join(", ");
                 anyhow::bail!(
-                    "databaseId {database_id} matched multiple PGSandbox profiles ({profiles}); retry with profile or postgresVersion."
+                    "{selector_label} {selector_value} matched multiple PGSandbox profiles ({profiles}); retry with profile or postgresVersion."
                 )
             }
         }
@@ -1280,18 +1328,21 @@ impl PostgresSandboxManager {
         drop(client);
         let _ = connection_task.await;
 
+        let connection_string = build_connection_string(
+            &profile.admin_url,
+            &names.database_name,
+            &names.role_name,
+            &role_password,
+        )?;
+
         Ok(CreateDatabaseOutput {
             database_id: names.database_id,
             profile: profile.name.clone(),
             database_name: names.database_name.clone(),
             role_name: names.role_name.clone(),
             expires_at,
-            connection_string: build_connection_string(
-                &profile.admin_url,
-                &names.database_name,
-                &names.role_name,
-                &role_password,
-            )?,
+            connection_string_redacted: mask_connection_string(&connection_string),
+            connection_string,
         })
     }
 
@@ -1357,6 +1408,7 @@ impl PostgresSandboxManager {
             database_name: created.database_name,
             role_name: created.role_name,
             expires_at: created.expires_at,
+            connection_string_redacted: mask_connection_string(&created.connection_string),
             connection_string: created.connection_string,
             source: "external".to_string(),
             schema_only,
@@ -1433,16 +1485,19 @@ impl PostgresSandboxManager {
             )
             .await?;
 
+        let connection_string = build_connection_string(
+            &profile.admin_url,
+            &record.database_name,
+            &record.role_name,
+            &unprotect_role_password(&record.role_password, &profile)?,
+        )?;
+
         Ok(ConnectionStringOutput {
             database_id: record.database_id,
             database_name: record.database_name.clone(),
             expires_at: record.expires_at,
-            connection_string: build_connection_string(
-                &profile.admin_url,
-                &record.database_name,
-                &record.role_name,
-                &unprotect_role_password(&record.role_password, &profile)?,
-            )?,
+            connection_string_redacted: mask_connection_string(&connection_string),
+            connection_string,
         })
     }
 
@@ -1569,6 +1624,9 @@ impl PostgresSandboxManager {
             database_id: connection.database_id,
             database_name: connection.database_name,
             row_count: result.row_count,
+            returned_row_count: result.returned_row_count,
+            affected_row_count: result.affected_row_count,
+            total_row_count_known: result.total_row_count_known,
             rows: result.rows,
             truncated: result.truncated,
             elapsed_ms: started.elapsed().as_millis(),
@@ -1892,11 +1950,17 @@ impl PostgresSandboxManager {
             &record.role_name,
             &unprotect_role_password(&record.role_password, &profile)?,
         )?;
-        let (client, connection_task) = connect_url(&connection_string).await?;
-        let postgres_version = postgres_version(&client).await?;
-        let digest = collect_schema_digest(&client).await?;
-        drop(client);
-        let _ = connection_task.await;
+        let (postgres_version, digest) =
+            match collect_schema_snapshot_digest_for_url(&connection_string).await {
+                Ok(result) => result,
+                Err(error) => {
+                    return Ok(workflow_failure(
+                        "Schema snapshot was not created.",
+                        schema_snapshot_workflow_error(error),
+                        None,
+                    ))
+                }
+            };
 
         let snapshot = SchemaSnapshotRecord {
             snapshot_name: snapshot_name.clone(),
@@ -1914,7 +1978,20 @@ impl PostgresSandboxManager {
             digest,
         };
         let paths = snapshot_paths(&profile.name, &record.database_id, &snapshot_name)?;
-        write_json_file(&paths.metadata_path, &snapshot)?;
+        if let Err(error) = write_json_file(&paths.metadata_path, &snapshot) {
+            return Ok(workflow_failure(
+                "Schema snapshot was not created.",
+                workflow_error(
+                    "schema_snapshot_failed",
+                    error.to_string(),
+                    Some(
+                        "Check that PGSANDBOX_HOME is writable and retry snapshot creation."
+                            .to_string(),
+                    ),
+                ),
+                None,
+            ));
+        }
         let summary = snapshot_summary(&snapshot);
 
         Ok(workflow_success(
@@ -2047,7 +2124,16 @@ impl PostgresSandboxManager {
             &record.role_name,
             &unprotect_role_password(&record.role_password, &profile)?,
         )?;
-        let current = collect_schema_digest_for_url(&connection_string).await?;
+        let current = match collect_schema_digest_for_url(&connection_string).await {
+            Ok(digest) => digest,
+            Err(error) => {
+                return Ok(workflow_failure(
+                    "Schema snapshot diff was not produced.",
+                    schema_snapshot_workflow_error(error),
+                    None,
+                ))
+            }
+        };
         if let Some(error) =
             workflow_schema_digest_version_mismatch(&snapshot_name, &snapshot.digest, &current)
         {
@@ -2150,7 +2236,7 @@ impl PostgresSandboxManager {
         let seed_command_configured = project_config.seed_command.is_some();
         let config_path = write_repo_project_config(&repo_path, &project_config)?;
         let action_needed = (!migration_command_configured).then(|| {
-            "Pass an explicit command to run_migrations/validate_migration or add migrationCommand to .pgsandbox/project.json.".to_string()
+            "Pass an explicit command to run_repo_command/validate_schema_change or add migrationCommand to .pgsandbox/project.json.".to_string()
         });
         let output = PrepareForRepoOutput {
             repo_path: repo_path.display().to_string(),
@@ -2175,16 +2261,23 @@ impl PostgresSandboxManager {
         ))
     }
 
-    pub async fn run_migrations(
+    pub async fn run_repo_command(
         &self,
-        input: RunMigrationsInput,
+        input: RunRepoCommandInput,
+    ) -> anyhow::Result<WorkflowEnvelope<CommandWorkflowOutput>> {
+        self.run_repo_schema_command(input).await
+    }
+
+    async fn run_repo_schema_command(
+        &self,
+        input: RunRepoCommandInput,
     ) -> anyhow::Result<WorkflowEnvelope<CommandWorkflowOutput>> {
         if !selector_has_database(&input.database_id, &input.database_name) {
             return Ok(workflow_failure(
-                "Migrations were not run.",
+                "Repo command was not run.",
                 workflow_error(
                     "missing_sandbox",
-                    "run_migrations requires databaseId or databaseName.",
+                    "Repo commands require databaseId or databaseName.",
                     Some("Create a sandbox first, then pass its databaseId.".to_string()),
                 ),
                 None,
@@ -2193,14 +2286,14 @@ impl PostgresSandboxManager {
         let repo_path = PathBuf::from(&input.repo_path);
         if !repo_path.is_dir() {
             return Ok(workflow_failure(
-                "Migrations were not run.",
+                "Repo command was not run.",
                 repo_not_found_error(&repo_path),
                 None,
             ));
         }
-        let command = match resolve_migration_command(&repo_path, input.command)? {
+        let command = match resolve_repo_schema_command(&repo_path, input.command)? {
             Ok(command) => command,
-            Err(error) => return Ok(workflow_failure("Migrations were not run.", error, None)),
+            Err(error) => return Ok(workflow_failure("Repo command was not run.", error, None)),
         };
         let timeout = workflow_timeout(input.timeout_seconds);
         let postgres_version =
@@ -2214,7 +2307,8 @@ impl PostgresSandboxManager {
             })
             .await?;
         let command_result =
-            run_repo_command(&repo_path, &command, &connection.connection_string, timeout).await?;
+            execute_repo_command(&repo_path, &command, &connection.connection_string, timeout)
+                .await?;
         let output = command_workflow_output(
             &connection.database_id,
             &connection.database_name,
@@ -2224,23 +2318,23 @@ impl PostgresSandboxManager {
 
         Ok(if ok {
             workflow_success(
-                "Migrations completed successfully.",
+                "Repo command completed successfully.",
                 None,
                 Vec::new(),
                 vec![json!({
-                    "type": "migration-run",
+                    "type": "repo-command-run",
                     "databaseId": connection.database_id
                 })],
                 output,
             )
         } else {
             workflow_failure(
-                "Migrations failed.",
+                "Repo command failed.",
                 workflow_error(
-                    "migration_failed",
-                    format!("Migration command exited with {:?}", output.exit_code),
+                    "repo_command_failed",
+                    format!("Repo command exited with {:?}", output.exit_code),
                     Some(
-                        "Inspect stderr/stdout in the result and rerun after fixing the migration."
+                        "Inspect stderr/stdout in the result and rerun after fixing the command."
                             .to_string(),
                     ),
                 ),
@@ -2249,23 +2343,30 @@ impl PostgresSandboxManager {
         })
     }
 
-    pub async fn validate_migration(
+    pub async fn validate_schema_change(
         &self,
-        input: ValidateMigrationInput,
-    ) -> anyhow::Result<WorkflowEnvelope<ValidateMigrationOutput>> {
+        input: ValidateSchemaChangeInput,
+    ) -> anyhow::Result<WorkflowEnvelope<ValidateSchemaChangeOutput>> {
+        self.validate_schema_change_workflow(input).await
+    }
+
+    async fn validate_schema_change_workflow(
+        &self,
+        input: ValidateSchemaChangeInput,
+    ) -> anyhow::Result<WorkflowEnvelope<ValidateSchemaChangeOutput>> {
         let repo_path = PathBuf::from(&input.repo_path);
         if !repo_path.is_dir() {
             return Ok(workflow_failure(
-                "Migration validation was not run.",
+                "Schema change validation was not run.",
                 repo_not_found_error(&repo_path),
                 None,
             ));
         }
-        let command = match resolve_migration_command(&repo_path, input.command)? {
+        let command = match resolve_repo_schema_command(&repo_path, input.command)? {
             Ok(command) => command,
             Err(error) => {
                 return Ok(workflow_failure(
-                    "Migration validation was not run.",
+                    "Schema change validation was not run.",
                     error,
                     None,
                 ))
@@ -2284,7 +2385,7 @@ impl PostgresSandboxManager {
                     name_hint: Some(
                         input
                             .name_hint
-                            .unwrap_or_else(|| "migration validation".to_string()),
+                            .unwrap_or_else(|| "schema change validation".to_string()),
                     ),
                     ttl_minutes: input.ttl_minutes,
                     owner: input.owner,
@@ -2296,6 +2397,7 @@ impl PostgresSandboxManager {
                 database_id: created.database_id,
                 database_name: created.database_name,
                 expires_at: created.expires_at,
+                connection_string_redacted: mask_connection_string(&created.connection_string),
                 connection_string: created.connection_string,
             }
         } else {
@@ -2307,47 +2409,79 @@ impl PostgresSandboxManager {
             })
             .await?
         };
-        let validation_result = async {
-            let before = collect_schema_digest_for_url(&connection.connection_string).await?;
-            let command_result =
-                run_repo_command(&repo_path, &command, &connection.connection_string, timeout)
+        let before = match collect_schema_digest_for_url(&connection.connection_string).await {
+            Ok(digest) => digest,
+            Err(error) => {
+                let summary = if created_sandbox {
+                    self.cleanup_auto_created_sandbox(
+                        created_profile.clone(),
+                        &connection,
+                        "schema change validation failed",
+                    )
                     .await?;
-            let after = collect_schema_digest_for_url(&connection.connection_string).await?;
-            let diff = diff_workflow_schema_digests(&before, &after);
-            anyhow::Ok((command_result, diff))
-        }
-        .await;
-        let (command_result, diff) = match validation_result {
+                    "Schema change validation failed before completion; the created sandbox was deleted."
+                } else {
+                    "Schema change validation failed before completion."
+                };
+                return Ok(workflow_failure(
+                    summary,
+                    schema_snapshot_workflow_error(error),
+                    None,
+                ));
+            }
+        };
+        let command_result = match execute_repo_command(
+            &repo_path,
+            &command,
+            &connection.connection_string,
+            timeout,
+        )
+        .await
+        {
             Ok(result) => result,
             Err(error) if created_sandbox => {
-                let cleanup = self
-                    .delete_database(DatabaseSelector {
-                        profile: created_profile.clone(),
-                        postgres_version: None,
-                        database_id: Some(connection.database_id.clone()),
-                        database_name: None,
-                    })
-                    .await;
-                return match cleanup {
-                    Ok(_) => Ok(workflow_failure(
-                        "Migration validation failed before completion; the created sandbox was deleted.",
+                self.cleanup_auto_created_sandbox(
+                    created_profile.clone(),
+                    &connection,
+                    "schema change validation failed",
+                )
+                .await?;
+                return Ok(workflow_failure(
+                        "Schema change validation failed before completion; the created sandbox was deleted.",
                         workflow_error(
-                            "migration_validation_error",
+                            "schema_change_validation_error",
                             error.to_string(),
                             Some("Retry after fixing the validation error. No sandbox cleanup is required.".to_string()),
                         ),
                         None,
-                    )),
-                    Err(cleanup_error) => Err(anyhow::anyhow!(
-                        "migration validation failed and cleanup also failed for {}: {error}; cleanup error: {cleanup_error}",
-                        connection.database_name
-                    )),
-                };
+                    ));
             }
             Err(error) => return Err(error),
         };
+        let after = match collect_schema_digest_for_url(&connection.connection_string).await {
+            Ok(digest) => digest,
+            Err(error) => {
+                let summary = if created_sandbox {
+                    self.cleanup_auto_created_sandbox(
+                        created_profile.clone(),
+                        &connection,
+                        "schema change validation failed",
+                    )
+                    .await?;
+                    "Schema change validation failed before completion; the created sandbox was deleted."
+                } else {
+                    "Schema change validation failed before completion."
+                };
+                return Ok(workflow_failure(
+                    summary,
+                    schema_snapshot_workflow_error(error),
+                    None,
+                ));
+            }
+        };
+        let diff = diff_workflow_schema_digests(&before, &after);
         let ok = command_result.exit_code == Some(0);
-        let output = validate_migration_output(
+        let output = validate_schema_change_output(
             &connection.database_id,
             &connection.database_name,
             created_sandbox,
@@ -2357,11 +2491,11 @@ impl PostgresSandboxManager {
 
         if ok {
             return Ok(workflow_success(
-                "Migration validation completed successfully.",
+                "Schema change validation completed successfully.",
                 Some(diff.changed_objects),
                 Vec::new(),
                 vec![json!({
-                    "type": "migration-validation",
+                    "type": "schema-change-validation",
                     "databaseId": connection.database_id,
                     "createdSandbox": created_sandbox
                 })],
@@ -2370,40 +2504,30 @@ impl PostgresSandboxManager {
         }
 
         let deleted_auto_sandbox = if created_sandbox {
-            let cleanup = self
-                .delete_database(DatabaseSelector {
-                    profile: created_profile,
-                    postgres_version: None,
-                    database_id: Some(connection.database_id.clone()),
-                    database_name: None,
-                })
-                .await;
-            match cleanup {
-                Ok(_) => true,
-                Err(cleanup_error) => {
-                    return Err(anyhow::anyhow!(
-                        "migration validation failed and cleanup also failed for {}: cleanup error: {cleanup_error}",
-                        connection.database_name
-                    ))
-                }
-            }
+            self.cleanup_auto_created_sandbox(
+                created_profile,
+                &connection,
+                "schema change validation failed",
+            )
+            .await?;
+            true
         } else {
             false
         };
 
         Ok(workflow_failure_with_changes(
             if deleted_auto_sandbox {
-                "Migration validation failed; the created sandbox was deleted."
+                "Schema change validation failed; the created sandbox was deleted."
             } else {
-                "Migration validation failed."
+                "Schema change validation failed."
             },
             diff.changed_objects,
             workflow_error(
-                "migration_failed",
-                format!("Migration command exited with {:?}", output.exit_code),
+                "repo_command_failed",
+                format!("Repo command exited with {:?}", output.exit_code),
                 Some(
                     if deleted_auto_sandbox {
-                        "Inspect stderr/stdout and rerun after fixing the migration. No sandbox cleanup is required."
+                        "Inspect stderr/stdout and rerun after fixing the command. No sandbox cleanup is required."
                     } else {
                         "Inspect stderr/stdout in the result and the schema diff before retrying."
                     }
@@ -2412,6 +2536,28 @@ impl PostgresSandboxManager {
             ),
             Some(output),
         ))
+    }
+
+    async fn cleanup_auto_created_sandbox(
+        &self,
+        created_profile: Option<String>,
+        connection: &ConnectionStringOutput,
+        context: &str,
+    ) -> anyhow::Result<()> {
+        self.delete_database(DatabaseSelector {
+            profile: created_profile,
+            postgres_version: None,
+            database_id: Some(connection.database_id.clone()),
+            database_name: None,
+        })
+        .await
+        .map(|_| ())
+        .map_err(|cleanup_error| {
+            anyhow::anyhow!(
+                "{context} and cleanup also failed for {}: cleanup error: {cleanup_error}",
+                connection.database_name
+            )
+        })
     }
 
     pub async fn seed_database(
@@ -2453,7 +2599,8 @@ impl PostgresSandboxManager {
             })
             .await?;
         let command_result =
-            run_repo_command(&repo_path, &command, &connection.connection_string, timeout).await?;
+            execute_repo_command(&repo_path, &command, &connection.connection_string, timeout)
+                .await?;
         let output = command_workflow_output(
             &connection.database_id,
             &connection.database_name,
@@ -2615,6 +2762,7 @@ impl PostgresSandboxManager {
             database_name: created.database_name,
             role_name: created.role_name,
             expires_at: created.expires_at,
+            connection_string_redacted: mask_connection_string(&created.connection_string),
             connection_string: created.connection_string,
             template_name: template_name.clone(),
         };
@@ -3050,13 +3198,16 @@ fn workflow_error_category(code: &str) -> &'static str {
     match code {
         "template_not_found" => "template_not_found",
         "template_restore_failed" => "restore_failed",
-        "missing_migration_command"
-        | "missing_seed_command"
+        "missing_seed_command"
+        | "missing_schema_change_command"
         | "unsafe_command"
         | "unclear_command"
         | "invalid_artifact_name"
         | "repo_not_found" => "validation",
-        "migration_failed" | "seed_failed" => "command_failed",
+        "repo_command_failed" | "seed_failed" => "command_failed",
+        "schema_change_validation_error" | "schema_snapshot_failed" | "schema_snapshot_timeout" => {
+            "workflow"
+        }
         _ => "workflow",
     }
 }
@@ -3085,6 +3236,18 @@ fn selector_is_unscoped_database_id(
         && database_name.is_none()
 }
 
+fn selector_is_unscoped_database_name(
+    profile_name: Option<&String>,
+    postgres_version: Option<&String>,
+    database_id: Option<&String>,
+    database_name: Option<&String>,
+) -> bool {
+    profile_name.is_none()
+        && postgres_version.is_none()
+        && database_id.is_none()
+        && database_name.is_some()
+}
+
 fn all_versions_requested(
     postgres_version: Option<&str>,
     include_all_versions: Option<bool>,
@@ -3104,10 +3267,76 @@ fn push_unique_profile(profiles: &mut Vec<SandboxProfile>, profile: SandboxProfi
 
 async fn collect_schema_digest_for_url(database_url: &str) -> anyhow::Result<WorkflowSchemaDigest> {
     let (client, connection_task) = connect_url(database_url).await?;
-    let digest = collect_schema_digest(&client).await?;
+    let digest = schema_phase_timeout("schema digest", collect_schema_digest(&client)).await;
     drop(client);
-    let _ = connection_task.await;
-    Ok(digest)
+    finish_connection_task(connection_task).await;
+    digest
+}
+
+async fn collect_schema_snapshot_digest_for_url(
+    database_url: &str,
+) -> anyhow::Result<(String, WorkflowSchemaDigest)> {
+    let (client, connection_task) = connect_url(database_url).await?;
+    let result = async {
+        let postgres_version =
+            schema_phase_timeout("postgres version", postgres_version(&client)).await?;
+        let digest = schema_phase_timeout("schema digest", collect_schema_digest(&client)).await?;
+        anyhow::Ok((postgres_version, digest))
+    }
+    .await;
+    drop(client);
+    finish_connection_task(connection_task).await;
+    result
+}
+
+async fn schema_phase_timeout<T, Fut>(phase: &'static str, operation: Fut) -> anyhow::Result<T>
+where
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let timeout = StdDuration::from_secs(DEFAULT_SCHEMA_OPERATION_TIMEOUT_SECONDS);
+    match time::timeout(timeout, operation).await {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!(
+            "schema_operation_timeout: {phase} exceeded {} seconds",
+            timeout.as_secs()
+        ),
+    }
+}
+
+async fn finish_connection_task(
+    mut connection_task: tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
+) {
+    let timeout = StdDuration::from_secs(CONNECTION_TASK_CLOSE_TIMEOUT_SECONDS);
+    tokio::select! {
+        _ = &mut connection_task => {}
+        _ = time::sleep(timeout) => {
+            connection_task.abort();
+            let _ = connection_task.await;
+        }
+    }
+}
+
+fn schema_snapshot_workflow_error(error: anyhow::Error) -> WorkflowError {
+    let message = error.to_string();
+    if message.contains("schema_operation_timeout") {
+        workflow_error(
+            "schema_snapshot_timeout",
+            message,
+            Some(
+                "Retry after checking for blocked schema locks; PGSandbox bounded this snapshot phase instead of waiting for the MCP client timeout."
+                    .to_string(),
+            ),
+        )
+    } else {
+        workflow_error(
+            "schema_snapshot_failed",
+            message,
+            Some(
+                "Run describe_schema or schema_digest to verify the sandbox schema, then retry snapshot creation."
+                    .to_string(),
+            ),
+        )
+    }
 }
 
 async fn collect_schema_digest(client: &Client) -> anyhow::Result<WorkflowSchemaDigest> {
@@ -3779,7 +4008,7 @@ fn read_repo_project_config(repo_path: &Path) -> anyhow::Result<Option<RepoProje
     read_json_file(&repo_project_config_path(repo_path))
 }
 
-fn resolve_migration_command(
+fn resolve_repo_schema_command(
     repo_path: &Path,
     input_command: Option<Vec<String>>,
 ) -> anyhow::Result<Result<Vec<String>, WorkflowError>> {
@@ -3790,18 +4019,18 @@ fn resolve_migration_command(
                 Some(command) => command,
                 None => {
                     return Ok(Err(workflow_error(
-                        "missing_migration_command",
+                        "missing_schema_change_command",
                         ".pgsandbox/project.json has no migrationCommand.",
-                        Some("Pass an explicit migration command argv array or add migrationCommand to the project config.".to_string()),
+                        Some("Pass an explicit repo command argv array or add migrationCommand to the project config.".to_string()),
                     )))
                 }
             },
             None => {
                 return Ok(Err(workflow_error(
-                    "missing_migration_command",
-                    "No migration command was provided and .pgsandbox/project.json is missing.",
+                    "missing_schema_change_command",
+                    "No schema change command was provided and .pgsandbox/project.json is missing.",
                     Some(
-                        "Pass an explicit migration command argv array, or run prepare_for_repo with migrationCommand."
+                        "Pass an explicit repo command argv array, call run_sql for direct SQL, or run prepare_for_repo with migrationCommand."
                             .to_string(),
                     ),
                 )))
@@ -3946,7 +4175,7 @@ fn workflow_timeout(timeout_seconds: Option<u64>) -> StdDuration {
     )
 }
 
-async fn run_repo_command(
+async fn execute_repo_command(
     repo_path: &Path,
     command: &[String],
     database_url: &str,
@@ -4075,14 +4304,14 @@ fn command_workflow_output(
     }
 }
 
-fn validate_migration_output(
+fn validate_schema_change_output(
     database_id: &str,
     database_name: &str,
     created_sandbox: bool,
     result: CommandRunResult,
     schema_diff: WorkflowSchemaDiffOutput,
-) -> ValidateMigrationOutput {
-    ValidateMigrationOutput {
+) -> ValidateSchemaChangeOutput {
+    ValidateSchemaChangeOutput {
         database_id: database_id.to_string(),
         database_name: database_name.to_string(),
         created_sandbox,
@@ -5610,12 +5839,16 @@ async fn run_cursor_query(
 
     let truncated = rows.len() > row_limit;
     let visible_rows = rows.into_iter().take(row_limit).collect::<Vec<_>>();
+    let returned_row_count = visible_rows.len();
     Ok(QueryExecutionResult {
         row_count: if truncated {
             None
         } else {
-            Some(visible_rows.len() as u64)
+            Some(returned_row_count as u64)
         },
+        returned_row_count,
+        affected_row_count: None,
+        total_row_count_known: !truncated,
         rows: rows_to_json(visible_rows)?,
         truncated,
     })
@@ -5632,12 +5865,16 @@ async fn run_typed_query(
         .await?;
     let truncated = rows.len() > row_limit;
     let visible_rows = rows.into_iter().take(row_limit).collect::<Vec<_>>();
+    let returned_row_count = visible_rows.len();
     Ok(QueryExecutionResult {
         row_count: if truncated {
             None
         } else {
-            Some(visible_rows.len() as u64)
+            Some(returned_row_count as u64)
         },
+        returned_row_count,
+        affected_row_count: None,
+        total_row_count_known: !truncated,
         rows: rows_to_json(visible_rows)?,
         truncated,
     })
@@ -5714,6 +5951,7 @@ fn format_simple_query_result(
     let mut current_rows = Vec::new();
     let mut current_had_rows = false;
     let mut final_rows = Vec::new();
+    let mut final_had_rows = false;
     let mut final_row_count = None;
 
     for message in messages {
@@ -5735,6 +5973,7 @@ fn format_simple_query_result(
             }
             SimpleQueryMessage::CommandComplete(count) => {
                 final_row_count = Some(count);
+                final_had_rows = current_had_rows;
                 final_rows = if current_had_rows {
                     std::mem::take(&mut current_rows)
                 } else {
@@ -5747,9 +5986,26 @@ fn format_simple_query_result(
     }
 
     let truncated = final_rows.len() > row_limit;
+    let visible_rows = final_rows.into_iter().take(row_limit).collect::<Vec<_>>();
+    let returned_row_count = if final_had_rows {
+        visible_rows.len()
+    } else {
+        0
+    };
     QueryExecutionResult {
-        row_count: final_row_count,
-        rows: final_rows.into_iter().take(row_limit).collect(),
+        row_count: if final_had_rows && truncated {
+            None
+        } else {
+            final_row_count
+        },
+        returned_row_count,
+        affected_row_count: if final_had_rows {
+            None
+        } else {
+            final_row_count
+        },
+        total_row_count_known: !final_had_rows || !truncated,
+        rows: visible_rows,
         truncated,
     }
 }
@@ -6783,12 +7039,27 @@ mod tests {
     #[test]
     fn workflow_errors_include_agent_branching_category() {
         let template = workflow_error("template_not_found", "missing", None);
-        let command = workflow_error("migration_failed", "failed", None);
-        let validation = workflow_error("unsafe_command", "unsafe", None);
+        let repo_command = workflow_error("repo_command_failed", "failed", None);
+        let validation = workflow_error("missing_schema_change_command", "missing", None);
+        let unsafe_command = workflow_error("unsafe_command", "unsafe", None);
 
         assert_eq!(template.category, "template_not_found");
-        assert_eq!(command.category, "command_failed");
+        assert_eq!(repo_command.category, "command_failed");
         assert_eq!(validation.category, "validation");
+        assert_eq!(unsafe_command.category, "validation");
+    }
+
+    #[test]
+    fn schema_snapshot_workflow_error_classifies_timeouts() {
+        let timeout = schema_snapshot_workflow_error(anyhow::anyhow!(
+            "schema_operation_timeout: schema digest exceeded 30 seconds"
+        ));
+        let failed = schema_snapshot_workflow_error(anyhow::anyhow!("catalog query failed"));
+
+        assert_eq!(timeout.code, "schema_snapshot_timeout");
+        assert_eq!(timeout.category, "workflow");
+        assert_eq!(failed.code, "schema_snapshot_failed");
+        assert_eq!(failed.category, "workflow");
     }
 
     #[test]
@@ -7281,7 +7552,7 @@ services:
         let directory = tempfile::tempdir().unwrap();
         let repo = directory.path();
 
-        assert!(resolve_migration_command(
+        let django = resolve_repo_schema_command(
             repo,
             Some(vec![
                 "npm".to_string(),
@@ -7290,9 +7561,10 @@ services:
             ]),
         )
         .unwrap()
-        .is_ok());
+        .unwrap();
+        assert_eq!(django[2], "migrate");
 
-        let shell = resolve_migration_command(
+        let shell = resolve_repo_schema_command(
             repo,
             Some(vec![
                 "bash".to_string(),
@@ -7304,7 +7576,7 @@ services:
         .unwrap_err();
         assert_eq!(shell.code, "unsafe_command");
 
-        let env_shell = resolve_migration_command(
+        let env_shell = resolve_repo_schema_command(
             repo,
             Some(vec![
                 "env".to_string(),
@@ -7317,7 +7589,7 @@ services:
         .unwrap_err();
         assert_eq!(env_shell.code, "unsafe_command");
 
-        let sudo_shell = resolve_migration_command(
+        let sudo_shell = resolve_repo_schema_command(
             repo,
             Some(vec![
                 "sudo".to_string(),
@@ -7330,7 +7602,7 @@ services:
         .unwrap_err();
         assert_eq!(sudo_shell.code, "unsafe_command");
 
-        let launcher_without_shell = resolve_migration_command(
+        let launcher_without_shell = resolve_repo_schema_command(
             repo,
             Some(vec![
                 "nsenter".to_string(),
@@ -7345,7 +7617,7 @@ services:
         .unwrap_err();
         assert_eq!(launcher_without_shell.code, "unsafe_command");
 
-        let alembic = resolve_migration_command(
+        let alembic = resolve_repo_schema_command(
             repo,
             Some(vec![
                 "alembic".to_string(),
@@ -7356,7 +7628,7 @@ services:
         .unwrap();
         assert!(alembic.is_ok());
 
-        let prisma = resolve_migration_command(
+        let prisma = resolve_repo_schema_command(
             repo,
             Some(vec![
                 "npx".to_string(),
@@ -7368,7 +7640,7 @@ services:
         .unwrap();
         assert!(prisma.is_ok());
 
-        let rails = resolve_migration_command(
+        let rails = resolve_repo_schema_command(
             repo,
             Some(vec![
                 "bundle".to_string(),
@@ -7380,10 +7652,52 @@ services:
         .unwrap();
         assert!(rails.is_ok());
 
-        let empty = resolve_migration_command(repo, Some(Vec::new()))
+        let psql_file = resolve_repo_schema_command(
+            repo,
+            Some(vec![
+                "psql".to_string(),
+                "$DATABASE_URL".to_string(),
+                "-f".to_string(),
+                "schema.sql".to_string(),
+            ]),
+        )
+        .unwrap();
+        assert!(psql_file.is_ok());
+
+        let missing = resolve_repo_schema_command(repo, None)
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(missing.code, "missing_schema_change_command");
+
+        let empty = resolve_repo_schema_command(repo, Some(Vec::new()))
             .unwrap()
             .unwrap_err();
         assert_eq!(empty.code, "unclear_command");
+    }
+
+    #[test]
+    fn unscoped_database_name_uses_cross_profile_lookup_policy() {
+        let name = "pgsandbox_app_123".to_string();
+        let id = "abc".to_string();
+
+        assert!(selector_is_unscoped_database_name(
+            None,
+            None,
+            None,
+            Some(&name)
+        ));
+        assert!(!selector_is_unscoped_database_name(
+            Some(&"local".to_string()),
+            None,
+            None,
+            Some(&name)
+        ));
+        assert!(!selector_is_unscoped_database_name(
+            None,
+            None,
+            Some(&id),
+            Some(&name)
+        ));
     }
 
     #[test]

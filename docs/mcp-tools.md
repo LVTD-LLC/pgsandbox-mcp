@@ -27,16 +27,18 @@ Workflow-oriented tools return a compact result envelope:
 
 Tool failures are returned as MCP tool errors whose text content is a safe JSON
 object with `ok: false`, `error.code`, `error.category`, `error.message`, and
-`error.hint`. Passwords and full connection strings are masked. Expected
-failure classes use stable categories such as `constraint_violation`,
-`readonly_violation`, `database_not_found`, `version_mismatch`,
-`restore_incompatible`, and `template_not_found`. Version diagnostics may also
-include `requestedVersion`, `sourceVersion`, `targetVersion`,
-`detectedVersions`, and a `detailHandle` pointing to `list_profiles` or
-`pgsandbox-mcp doctor` instead of embedding long local path traces. Typical
-codes include `postgres_auth_failed`,
-`postgres_connection_failed`, `postgres_version_unavailable`, and
-`local_postgres_unavailable`.
+`error.hint`. Passwords and full connection strings are masked. Postgres errors
+include `error.sqlstate` when it is available. Expected failure classes use
+stable categories such as `sql_analysis`, `sql_syntax`,
+`constraint_violation`, `readonly_violation`, `database_not_found`,
+`version_mismatch`, `restore_incompatible`, and `template_not_found`. Version
+diagnostics may also include `requestedVersion`, `sourceVersion`,
+`targetVersion`, `detectedVersions`, and a `detailHandle` pointing to
+`list_profiles` or `doctor` instead of embedding long local path traces.
+Typical codes include `undefined_column`, `undefined_table`, `syntax_error`,
+`permission_denied`, `lock_timeout`, `statement_timeout`,
+`postgres_auth_failed`, `postgres_connection_failed`,
+`postgres_version_unavailable`, and `local_postgres_unavailable`.
 
 When selecting a local major version, omit `profile` and pass only
 `postgresVersion`, for example `{ "postgresVersion": "18" }`. Supplying both is
@@ -63,6 +65,8 @@ Returns:
 - `roleName`
 - `expiresAt`
 - `connectionString`
+- `connectionStringRedacted`: safe display value for logs, task trackers, and
+  summaries
 
 ## `list_profiles`
 
@@ -90,6 +94,26 @@ Use `includeDiscoveredLocal: true` before requesting a `postgresVersion`. The
 server does not download Postgres; the requested major must be installed locally
 or supplied through `PGSANDBOX_POSTGRES_BIN_DIR` or
 `PGSANDBOX_POSTGRES_<MAJOR>_BIN_DIR`.
+
+## `doctor`
+
+Returns MCP-safe version, profile health, and redacted diagnostics without
+mutating sandboxes.
+
+Inputs:
+
+- `postgresVersion`: optional Postgres major version to include in config
+  resolution and local-runtime checks
+
+Returns:
+
+- `ok`: whether diagnostics passed
+- `serverVersion`
+- `toolCount`
+- `lines`: bounded human-readable diagnostic lines with passwords masked
+
+Agents should call this when troubleshooting connectivity, version discovery,
+or MCP setup problems. It is the MCP equivalent of `pgsandbox-mcp doctor`.
 
 ## `clone_database`
 
@@ -120,6 +144,7 @@ Returns:
 - `roleName`
 - `expiresAt`
 - `connectionString`
+- `connectionStringRedacted`
 - `source`: currently `external`
 - `schemaOnly`
 
@@ -157,6 +182,7 @@ Inputs:
 Returns:
 
 - `connectionString`
+- `connectionStringRedacted`
 - `expiresAt`
 
 ## `run_sql`
@@ -176,6 +202,10 @@ Returns:
 
 - rows for result-producing statements
 - affected row count for mutations
+- `returnedRowCount`: number of rows included in `rows`
+- `affectedRowCount`: affected rows for DML/DDL command tags when applicable
+- `totalRowCountKnown`: whether the total row count is known without inference
+- `truncated`: whether `rows` was bounded by `rowLimit`
 - execution timing
 
 Typed result rows serialize common scalar and array values to JSON. Numeric
@@ -252,7 +282,9 @@ Inputs:
 - `baseDigest`: a previous `schema_digest` response object. A JSON string that
   contains the full serialized `schema_digest` response is also accepted for
   agent workflows that pass tool output through string-only storage. A checksum
-  string alone is not enough to compute a diff.
+  string alone is not enough to compute a diff; checksum-only input returns
+  `code: "invalid_base_digest"` with a hint to pass the full object or use
+  schema snapshots.
 
 Example:
 
@@ -371,9 +403,12 @@ Deletes the local snapshot artifact.
 ## Repo Workflow Tools
 
 These tools are repo-aware but conservative. They do not rewrite application
-settings permanently and they run commands without a shell. Database access is
-injected through `DATABASE_URL`, `PGSANDBOX_DATABASE_URL`, and libpq-style
-`PG*` environment variables.
+settings permanently and they execute the exact argv array supplied by the
+caller without an implicit shell. Database access is injected through
+`DATABASE_URL`, `PGSANDBOX_DATABASE_URL`, and libpq-style `PG*` environment
+variables. Use `run_sql` for direct SQL, `run_repo_command` for an explicit
+repo command, and `validate_schema_change` when a before/after schema diff is
+needed. Django detection remains a convenience preset, not a requirement.
 
 ### `prepare_for_repo`
 
@@ -393,9 +428,10 @@ Inputs:
 - `migrationCommand`: optional argv array for the repo migration workflow
 - `seedCommand`: optional argv array for the repo seed workflow
 
-### `run_migrations`
+### `run_repo_command`
 
-Runs an explicit or configured migration command against a selected sandbox.
+Runs an explicit or configured repo schema-change command against a selected
+sandbox.
 
 Inputs:
 
@@ -407,11 +443,15 @@ Inputs:
 - `command`: optional argv array; defaults to `.pgsandbox/project.json`
 - `timeoutSeconds`: optional timeout, capped by the server
 
-### `validate_migration`
+The command runs with `repoPath` as current directory. The argv array must be
+short, non-empty, free of NUL/newline characters, and is executed directly
+without shell expansion or indirect launchers.
 
-Captures a before schema digest, runs the migration command against a
-fresh or selected sandbox, captures the after digest, and returns a compact
-schema diff plus bounded command output.
+### `validate_schema_change`
+
+Captures a before schema digest, runs an explicit or configured repo
+schema-change command against a fresh or selected sandbox, captures the after
+digest, and returns a compact schema diff plus bounded command output.
 
 Inputs:
 
@@ -423,6 +463,11 @@ Inputs:
 - `command`: optional argv array; defaults to `.pgsandbox/project.json`
 - `timeoutSeconds`
 - `nameHint`, `ttlMinutes`, `owner`, `labels`: used when creating a fresh sandbox
+
+If `databaseId`/`databaseName` is omitted, this tool creates a sandbox and the
+response states `createdSandbox`. Failed validations delete that auto-created
+sandbox when cleanup succeeds; successful validations return the created
+sandbox id so callers can inspect it or delete it explicitly.
 
 ### `seed_database`
 
@@ -475,8 +520,9 @@ Inputs:
 - `owner`
 - `labels`
 
-Returns the new sandbox metadata and connection string. The workflow envelope
-includes the payload under both `result` and `createdSandbox`.
+Returns the new sandbox metadata, `connectionString`, and
+`connectionStringRedacted`. The workflow envelope includes the payload under
+both `result` and `createdSandbox`.
 
 ### `list_templates`
 
@@ -550,12 +596,13 @@ Returns:
 
 ## Stable Agent Contract
 
-`databaseId` is globally resolvable by database-id-only calls when the server can
-search configured profiles and running managed-local profiles. If a profile
-cannot be searched or the id is not found, the error uses
-`category: "database_not_found"` and tells the caller to retry with
+`databaseId` and unscoped `databaseName` are globally resolvable by id/name-only
+calls when the server can search configured profiles and running managed-local
+profiles. If a profile cannot be searched or the sandbox is not found, the
+error uses `category: "database_not_found"` and tells the caller to retry with
 `profile`/`postgresVersion` or call `list_databases` with
-`includeAllVersions=true`.
+`includeAllVersions=true`. If a name matches multiple profiles, retry with the
+profile or Postgres version to disambiguate.
 
 Unversioned `list_databases` and `cleanup_expired` are scoped to the selected
 default profile. Use `includeAllVersions=true` or `postgresVersion: "*"` when an

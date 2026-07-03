@@ -418,8 +418,8 @@ V0 supports:
 - `diff_schema_snapshot`
 - `delete_schema_snapshot`
 - `prepare_for_repo`
-- `run_migrations`
-- `validate_migration`
+- `run_repo_command`
+- `validate_schema_change`
 - `seed_database`
 - `create_template_from_sandbox`
 - `create_sandbox_from_template`
@@ -427,8 +427,11 @@ V0 supports:
 - `delete_template`
 - `list_databases`
 - `cleanup_expired`
+- `doctor`
 
-See [docs/mcp-tools.md](docs/mcp-tools.md) for details.
+See [docs/mcp-tools.md](docs/mcp-tools.md) for tool contracts and
+[docs/agent-workflows.md](docs/agent-workflows.md) for copyable agent-first
+workflow examples.
 
 For tool discovery, the schema inspection family is `describe_schema`,
 `schema_digest`, `schema_diff`, `create_schema_snapshot`,
@@ -443,29 +446,36 @@ baselines, and drift detection. The reusable seeded-state family is
 For repo-backed database work, an agent can:
 
 1. Create or select a sandbox with `create_database`.
-2. Optionally call `prepare_for_repo` with the repo path and explicit
-   `migrationCommand` or `seedCommand` argv arrays. This writes a secret-free
+2. Use `run_sql` for direct SQL changes, or `run_repo_command` for an explicit
+   repo command such as `["npm", "run", "migrate"]`.
+3. Use `validate_schema_change` when the agent needs a before/after schema diff
+   around a direct repo command.
+4. Optionally call `prepare_for_repo` with explicit `migrationCommand` or
+   `seedCommand` argv arrays. This writes a secret-free
    `.pgsandbox/project.json`. If the repo has a `postgres:<major>` or compatible
    Compose/devcontainer image, PGSandbox records that version for later workflow
    calls.
-3. Call `validate_migration` with an explicit command or configured
-   `migrationCommand` to run the repo's migration workflow against the sandbox
-   and receive a before/after schema diff.
-4. Optionally call `seed_database` with an explicit seed command.
-5. Save reusable state with `create_schema_snapshot` or
+5. Optionally call `seed_database` with an explicit seed command.
+6. Save reusable state with `create_schema_snapshot` or
    `create_template_from_sandbox`.
 
 Workflow tools use compact envelopes with `ok`, `summary`, structured
 `errors`, bounded output, and optional `changedObjects`. Command and tool
-errors include stable categories such as `database_not_found`,
-`version_mismatch`, `restore_incompatible`, `constraint_violation`,
-`readonly_violation`, and `template_not_found` so agents can branch without
-parsing prose. Commands are executed without a shell and receive sandbox
+errors include stable categories such as `sql_analysis`, `sql_syntax`,
+`database_not_found`, `version_mismatch`, `restore_incompatible`,
+`constraint_violation`, `readonly_violation`, and `template_not_found` so
+agents can branch without parsing prose. Postgres errors include SQLSTATE when
+available. Commands are executed without an implicit shell and receive sandbox
 credentials through environment variables, not permanent settings rewrites.
 Schema inspection includes relation-kind counts, constraints, column defaults
 and generated expressions, and view definition hashes. `run_sql` returns common
 Postgres arrays such as `text[]`, integer arrays, `uuid[]`, `jsonb[]`, and
 `timestamptz[]` as JSON arrays; numeric values remain strings for precision.
+It also reports `returnedRowCount`, `affectedRowCount`, `totalRowCountKnown`,
+and `truncated` so agents do not infer row-count semantics from `rowCount`.
+Tools that intentionally return credentials also include
+`connectionStringRedacted` for safe summaries and task trackers. Use `doctor`
+from MCP when a client cannot shell out to `pgsandbox-mcp doctor`.
 
 By default, `list_databases` and `cleanup_expired` are scoped to the selected
 profile. Pass `includeAllVersions: true` or `postgresVersion: "*"` for an
@@ -535,6 +545,13 @@ cargo check
 cargo test
 cargo build --release
 npm run site:build
+```
+
+The opt-in dogfooding regression suite exercises MCP reliability paths against
+real disposable sandboxes when local Postgres is available:
+
+```bash
+PGSANDBOX_DOGFOOD_E2E=1 cargo test --test dogfood_reliability -- --nocapture
 ```
 
 Release packaging check:
