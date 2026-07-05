@@ -219,9 +219,12 @@ returned as strings to preserve precision. `timestamp`, `timestamptz`, and
 as nested JSON. Common Postgres arrays such as `text[]`, integer arrays,
 `uuid[]`, `jsonb[]`, and `timestamptz[]` return JSON arrays with SQL `NULL`
 elements preserved as JSON `null`; `int8[]` elements follow the same string
-serialization rule. With `readonly: true`, mutating statements are blocked by a
-read-only transaction; readonly violations are wrapped with an MCP-level
-message that names the attempted statement while preserving database detail.
+serialization rule. Unsupported non-null Postgres result types return a
+structured object with `unsupportedPostgresType` and a cast-to-text `hint`;
+unsupported SQL `NULL` values remain JSON `null`. With `readonly: true`,
+mutating statements are blocked by a read-only transaction; readonly violations
+are wrapped with an MCP-level message that names the attempted statement while
+preserving database detail.
 
 ## `describe_schema`
 

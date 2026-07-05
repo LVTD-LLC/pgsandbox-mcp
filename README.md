@@ -479,6 +479,9 @@ Postgres arrays such as `text[]`, integer arrays, `uuid[]`, `jsonb[]`, and
 results, and `numeric` values are serialized as JSON strings to preserve
 precision. `timestamp`, `timestamptz`, and `date` values are serialized as
 strings, while `json` and `jsonb` values are returned as nested JSON.
+Unsupported non-null Postgres result types return a structured object with the
+original type name and a cast-to-text hint; unsupported SQL `NULL` values remain
+JSON `null`.
 It also reports `returnedRowCount`, `affectedRowCount`, `totalRowCountKnown`,
 and `truncated` so agents do not infer row-count semantics from `rowCount`.
 Creation tools return `connectionStringRedacted` for safe summaries and task
