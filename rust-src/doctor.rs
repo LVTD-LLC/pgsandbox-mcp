@@ -118,9 +118,20 @@ fn discovered_postgres_versions() -> Vec<String> {
         .into_iter()
         .map(|installation| installation.postgres_version)
         .collect::<Vec<_>>();
-    versions.sort();
+    sort_postgres_versions(&mut versions);
     versions.dedup();
     versions
+}
+
+fn sort_postgres_versions(versions: &mut [String]) {
+    versions.sort_by(|left, right| {
+        let left_major = left.parse::<u32>().ok();
+        let right_major = right.parse::<u32>().ok();
+        match (left_major, right_major) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            _ => left.cmp(right),
+        }
+    });
 }
 
 fn doctor_config_error_lines(message: &str, available_versions: &[String]) -> Vec<String> {
@@ -274,5 +285,14 @@ mod tests {
         assert!(!text.contains("Tried:"));
         assert!(!text.contains("/very/long/path"));
         assert!(!text.contains("/another/path"));
+    }
+
+    #[test]
+    fn discovered_postgres_versions_sort_numerically() {
+        let mut versions = vec!["9".to_string(), "18".to_string(), "16".to_string()];
+
+        sort_postgres_versions(&mut versions);
+
+        assert_eq!(versions, ["9", "16", "18"]);
     }
 }
