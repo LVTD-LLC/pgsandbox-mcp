@@ -4099,10 +4099,16 @@ fn workflow_command_bounds_error(command: &[String], label: &str) -> WorkflowErr
     let part_count = command.len();
     let total_len = command.iter().map(String::len).sum::<usize>();
     let longest_part_len = command.iter().map(String::len).max().unwrap_or(0);
+    let part_suffix = if part_count == 1 { "part" } else { "parts" };
+    let longest_clause = if part_count > 0 {
+        format!(", and longest part is {longest_part_len} bytes")
+    } else {
+        String::new()
+    };
     workflow_error(
         "unclear_command",
         format!(
-            "{label} is invalid: observed {part_count} argv parts, {total_len} total bytes, and longest part is {longest_part_len} bytes. Limits: 1 to maximum {MAX_WORKFLOW_COMMAND_PARTS} argv parts, maximum {MAX_WORKFLOW_COMMAND_TOTAL_BYTES} total bytes, maximum {MAX_WORKFLOW_COMMAND_PART_BYTES} bytes per part, and no NUL/newline characters."
+            "{label} is invalid: observed {part_count} argv {part_suffix}, {total_len} total bytes{longest_clause}. Limits: 1 to maximum {MAX_WORKFLOW_COMMAND_PARTS} argv parts, maximum {MAX_WORKFLOW_COMMAND_TOTAL_BYTES} total bytes, maximum {MAX_WORKFLOW_COMMAND_PART_BYTES} bytes per part, and no NUL/newline characters."
         ),
         Some(
             format!(
@@ -7706,12 +7712,13 @@ services:
         assert_eq!(empty.code, "unclear_command");
         assert!(empty.message.contains("0 argv parts"));
         assert!(empty.message.contains("maximum 16"));
+        assert!(!empty.message.contains("longest part"));
 
         let oversized = resolve_repo_schema_command(repo, Some(vec!["x".repeat(257)]))
             .unwrap()
             .unwrap_err();
         assert_eq!(oversized.code, "unclear_command");
-        assert!(oversized.message.contains("1 argv parts"));
+        assert!(oversized.message.contains("1 argv part"));
         assert!(oversized.message.contains("longest part is 257 bytes"));
         assert!(oversized.hint.unwrap().contains("maximum 256 bytes"));
     }
