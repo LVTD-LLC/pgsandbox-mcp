@@ -220,6 +220,22 @@ The safest default is a small, sanitized seeded state restored into a fresh task
         "@type": "Answer",
         "text": "No. PGSandbox local templates are pg_dump artifacts plus metadata. Restoring one creates a fresh tracked sandbox with its own role, TTL, owner, labels, and cleanup path."
       }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I use both native templates and PGSandbox?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes, if the responsibility is clear. A database operator can maintain native server templates. PGSandbox can still create task sandboxes, scoped roles, proof records, and cleanup around agent work. For most agent QA loops, PGSandbox local templates are the cleaner reusable-state layer because they restore into tracked sandboxes."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What is the safest default for seeded agent tests?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "The safest default is a small, sanitized seeded state restored into a fresh task sandbox. Keep the reusable artifact local, document what it contains, give each agent task its own role and TTL, and delete the sandbox when the proof is captured."
+      }
     }
   ]
 }
