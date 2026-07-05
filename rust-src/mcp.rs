@@ -70,6 +70,7 @@ struct DoctorOutput {
     ok: bool,
     server_version: String,
     tool_count: usize,
+    available_postgres_versions: Vec<String>,
     lines: Vec<String>,
 }
 
@@ -638,6 +639,7 @@ impl PgsandboxServer {
                 ok: result.ok,
                 server_version: crate::VERSION.to_string(),
                 tool_count: PUBLIC_MCP_TOOL_COUNT,
+                available_postgres_versions: result.available_postgres_versions,
                 lines: result.lines,
             })
         })

@@ -118,6 +118,8 @@ Returns:
 - `ok`: whether diagnostics passed
 - `serverVersion`
 - `toolCount`
+- `availablePostgresVersions`: discovered local Postgres majors, empty when
+  none are found
 - `lines`: bounded human-readable diagnostic lines with passwords masked
 
 Agents should call this when troubleshooting connectivity, version discovery,
