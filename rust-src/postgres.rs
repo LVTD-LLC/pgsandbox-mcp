@@ -109,7 +109,7 @@ pub struct DatabaseSelector {
     pub database_name: Option<String>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DescribeSchemaInput {
     pub profile: Option<String>,
@@ -126,6 +126,17 @@ impl From<DescribeSchemaInput> for DatabaseSelector {
             postgres_version: input.postgres_version,
             database_id: input.database_id,
             database_name: input.database_name,
+        }
+    }
+}
+
+impl From<&DescribeSchemaInput> for DatabaseSelector {
+    fn from(input: &DescribeSchemaInput) -> Self {
+        Self {
+            profile: input.profile.clone(),
+            postgres_version: input.postgres_version.clone(),
+            database_id: input.database_id.clone(),
+            database_name: input.database_name.clone(),
         }
     }
 }
@@ -1928,11 +1939,7 @@ impl PostgresSandboxManager {
             relation_counts,
             tables: schema_rows_to_json(tables, TABLE_LEGACY_ALIASES, include_legacy_aliases)?,
             columns: schema_rows_to_json(columns, COLUMN_LEGACY_ALIASES, include_legacy_aliases)?,
-            constraints: schema_rows_to_json(
-                constraints,
-                CONSTRAINT_LEGACY_ALIASES,
-                include_legacy_aliases,
-            )?,
+            constraints: constraint_rows_to_json(constraints, include_legacy_aliases)?,
             indexes: schema_rows_to_json(indexes, INDEX_LEGACY_ALIASES, include_legacy_aliases)?,
             views: schema_rows_to_json(views, VIEW_LEGACY_ALIASES, include_legacy_aliases)?,
             extensions: schema_rows_to_json(
@@ -5341,6 +5348,18 @@ fn schema_rows_to_json(
         .collect()
 }
 
+fn constraint_rows_to_json(
+    rows: Vec<Row>,
+    include_legacy_aliases: bool,
+) -> anyhow::Result<Vec<Value>> {
+    rows.iter()
+        .map(|row| {
+            row_to_json(row)
+                .map(|value| canonical_constraint_schema_json_object(value, include_legacy_aliases))
+        })
+        .collect()
+}
+
 fn canonical_schema_json_object(
     value: Value,
     legacy_aliases: &[(&str, &str)],
@@ -5358,8 +5377,6 @@ fn canonical_schema_json_object(
         }
     }
 
-    normalize_constraint_type_field(&mut object, "constraintType");
-
     if include_legacy_aliases {
         for (legacy_key, canonical_key) in legacy_aliases {
             if let Some(value) = object.get(*canonical_key).cloned() {
@@ -5369,6 +5386,23 @@ fn canonical_schema_json_object(
     } else {
         for (legacy_key, _) in legacy_aliases {
             object.remove(*legacy_key);
+        }
+    }
+
+    Value::Object(object)
+}
+
+fn canonical_constraint_schema_json_object(value: Value, include_legacy_aliases: bool) -> Value {
+    let value =
+        canonical_schema_json_object(value, CONSTRAINT_LEGACY_ALIASES, include_legacy_aliases);
+    let Value::Object(mut object) = value else {
+        return value;
+    };
+
+    normalize_constraint_type_field(&mut object, "constraintType");
+    if include_legacy_aliases {
+        if let Some(value) = object.get("constraintType").cloned() {
+            object.insert("constraint_type".to_string(), value);
         }
     }
 
@@ -7252,7 +7286,7 @@ mod tests {
 
     #[test]
     fn describe_schema_compacts_to_canonical_fields_by_default() {
-        let compact = canonical_schema_json_object(
+        let compact = canonical_constraint_schema_json_object(
             json!({
                 "table_schema": "public",
                 "table_name": "accounts",
@@ -7264,7 +7298,6 @@ mod tests {
                 "constraintType": "n",
                 "definition": "NOT NULL"
             }),
-            CONSTRAINT_LEGACY_ALIASES,
             false,
         );
 
@@ -7280,7 +7313,7 @@ mod tests {
 
     #[test]
     fn describe_schema_can_include_normalized_legacy_aliases() {
-        let aliased = canonical_schema_json_object(
+        let aliased = canonical_constraint_schema_json_object(
             json!({
                 "table_schema": "public",
                 "table_name": "accounts",
@@ -7288,7 +7321,6 @@ mod tests {
                 "constraint_type": "n",
                 "definition": "NOT NULL"
             }),
-            CONSTRAINT_LEGACY_ALIASES,
             true,
         );
 

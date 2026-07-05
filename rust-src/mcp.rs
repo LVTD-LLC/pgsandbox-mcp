@@ -229,12 +229,7 @@ impl PgsandboxServer {
         &self,
         Parameters(input): Parameters<DescribeSchemaInput>,
     ) -> Result<CallToolResult, ErrorData> {
-        let mut event_properties = selector_properties(&DatabaseSelector {
-            profile: input.profile.clone(),
-            postgres_version: input.postgres_version.clone(),
-            database_id: input.database_id.clone(),
-            database_name: input.database_name.clone(),
-        });
+        let mut event_properties = selector_properties(&DatabaseSelector::from(&input));
         event_properties.insert(
             "includeLegacyAliases".to_string(),
             json!(input.include_legacy_aliases.unwrap_or(false)),
