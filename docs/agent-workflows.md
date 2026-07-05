@@ -3,6 +3,10 @@
 Use these workflows when an agent needs to validate Postgres behavior without
 assuming a framework.
 
+`ttlMinutes` values in these examples are positive minutes. Omit the field to
+use the profile default; `0` and negative values are rejected with
+`invalid_ttl`.
+
 ## Direct SQL Schema Change
 
 1. Create a sandbox.

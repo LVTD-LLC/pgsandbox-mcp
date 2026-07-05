@@ -84,7 +84,7 @@ pub struct CreateDatabaseInput {
     pub profile: Option<String>,
     pub postgres_version: Option<String>,
     pub name_hint: Option<String>,
-    pub ttl_minutes: Option<u32>,
+    pub ttl_minutes: Option<i64>,
     pub owner: Option<String>,
     pub labels: Option<BTreeMap<String, Value>>,
 }
@@ -96,7 +96,7 @@ pub struct CloneDatabaseInput {
     pub postgres_version: Option<String>,
     pub source_database_url: String,
     pub name_hint: Option<String>,
-    pub ttl_minutes: Option<u32>,
+    pub ttl_minutes: Option<i64>,
     pub owner: Option<String>,
     pub labels: Option<BTreeMap<String, Value>>,
     pub schema_only: Option<bool>,
@@ -239,7 +239,7 @@ pub struct ValidateSchemaChangeInput {
     pub command: Option<Vec<String>>,
     pub timeout_seconds: Option<u64>,
     pub name_hint: Option<String>,
-    pub ttl_minutes: Option<u32>,
+    pub ttl_minutes: Option<i64>,
     pub owner: Option<String>,
     pub labels: Option<BTreeMap<String, Value>>,
 }
@@ -275,7 +275,7 @@ pub struct CreateSandboxFromTemplateInput {
     pub postgres_version: Option<String>,
     pub template_name: String,
     pub name_hint: Option<String>,
-    pub ttl_minutes: Option<u32>,
+    pub ttl_minutes: Option<i64>,
     pub owner: Option<String>,
     pub labels: Option<BTreeMap<String, Value>>,
 }
@@ -5736,16 +5736,22 @@ fn clone_tool_failure_message(
     None
 }
 
-fn clamp_ttl(ttl_minutes: Option<u32>, profile: &SandboxProfile) -> anyhow::Result<u32> {
-    let ttl_minutes = ttl_minutes.unwrap_or(profile.default_ttl_minutes);
-    if ttl_minutes > profile.max_ttl_minutes {
+fn clamp_ttl(ttl_minutes: Option<i64>, profile: &SandboxProfile) -> anyhow::Result<u32> {
+    let ttl_minutes = ttl_minutes.unwrap_or(i64::from(profile.default_ttl_minutes));
+    if ttl_minutes <= 0 {
         anyhow::bail!(
-            "ttlMinutes exceeds maxTtlMinutes ({}) for profile {}",
+            "invalid_ttl: ttlMinutes must be at least 1 minute for profile {}",
+            profile.name
+        );
+    }
+    if ttl_minutes > i64::from(profile.max_ttl_minutes) {
+        anyhow::bail!(
+            "invalid_ttl: ttlMinutes exceeds maxTtlMinutes ({}) for profile {}",
             profile.max_ttl_minutes,
             profile.name
         );
     }
-    Ok(ttl_minutes)
+    Ok(ttl_minutes as u32)
 }
 
 pub fn assert_safe_readonly_sql(sql: &str) -> anyhow::Result<()> {
@@ -7356,6 +7362,75 @@ mod tests {
 
         assert!(sql.contains("deleted_at IS NULL"));
         assert!(sql.contains("expires_at > now()"));
+    }
+
+    #[test]
+    fn ttl_validation_rejects_zero_minutes() {
+        let profile = &test_config().profiles[0];
+
+        let error = clamp_ttl(Some(0), profile).unwrap_err();
+
+        assert!(error.to_string().contains("invalid_ttl"));
+        assert!(error.to_string().contains("ttlMinutes must be at least 1"));
+    }
+
+    #[test]
+    fn ttl_validation_rejects_negative_minutes_after_deserialization() {
+        let input =
+            serde_json::from_value::<CreateDatabaseInput>(json!({ "ttlMinutes": -1 })).unwrap();
+        let profile = &test_config().profiles[0];
+
+        let error = clamp_ttl(input.ttl_minutes, profile).unwrap_err();
+
+        assert!(error.to_string().contains("invalid_ttl"));
+        assert!(error.to_string().contains("ttlMinutes must be at least 1"));
+    }
+
+    #[test]
+    fn ttl_validation_accepts_negative_values_from_all_ttl_input_shapes() {
+        let create =
+            serde_json::from_value::<CreateDatabaseInput>(json!({ "ttlMinutes": -1 })).unwrap();
+        let clone = serde_json::from_value::<CloneDatabaseInput>(json!({
+            "sourceDatabaseUrl": "postgres://postgres:secret@localhost/source",
+            "ttlMinutes": -1
+        }))
+        .unwrap();
+        let validate = serde_json::from_value::<ValidateSchemaChangeInput>(json!({
+            "repoPath": "/tmp/repo",
+            "ttlMinutes": -1
+        }))
+        .unwrap();
+        let template = serde_json::from_value::<CreateSandboxFromTemplateInput>(json!({
+            "templateName": "seeded_accounts",
+            "ttlMinutes": -1
+        }))
+        .unwrap();
+
+        assert_eq!(create.ttl_minutes, Some(-1));
+        assert_eq!(clone.ttl_minutes, Some(-1));
+        assert_eq!(validate.ttl_minutes, Some(-1));
+        assert_eq!(template.ttl_minutes, Some(-1));
+    }
+
+    #[test]
+    fn ttl_validation_accepts_positive_minutes_and_default() {
+        let profile = &test_config().profiles[0];
+
+        assert_eq!(
+            clamp_ttl(None, profile).unwrap(),
+            profile.default_ttl_minutes
+        );
+        assert_eq!(clamp_ttl(Some(1), profile).unwrap(), 1);
+    }
+
+    #[test]
+    fn ttl_validation_rejects_minutes_above_profile_max() {
+        let profile = &test_config().profiles[0];
+
+        let error = clamp_ttl(Some(i64::from(profile.max_ttl_minutes) + 1), profile).unwrap_err();
+
+        assert!(error.to_string().contains("invalid_ttl"));
+        assert!(error.to_string().contains("maxTtlMinutes"));
     }
 
     #[test]

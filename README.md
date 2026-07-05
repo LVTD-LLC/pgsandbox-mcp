@@ -322,6 +322,9 @@ export PGSANDBOX_CONFIG="./pgsandbox.config.json"
 pgsandbox-mcp
 ```
 
+Profile `defaultTtlMinutes` and `maxTtlMinutes` must both be positive, and the
+default cannot exceed the max.
+
 MCP tools can select profiles by `profile` or by `postgresVersion` when profile
 metadata is present. On the managed local default, requesting `postgresVersion`
 starts the corresponding `local-pg<major>` cluster on demand when matching
@@ -333,6 +336,12 @@ Supplying both is reserved for intentionally targeting an exact versioned
 profile; mismatches return a structured `version_mismatch` error. Major-only
 version strings such as `"16"`, `"17"`, and `"18"` are canonical, and patch
 strings are normalized to the major.
+
+When passing `ttlMinutes`, use a positive integer number of minutes. Omit it to
+use the profile default. `ttlMinutes: 0` and negative values are rejected with
+`invalid_ttl` so a missing duration variable does not create an immediately
+expired sandbox; values above the profile `maxTtlMinutes` cap are rejected as
+well.
 
 Sandbox `databaseId` lookup works across configured profiles and running
 managed-local profiles when the call provides only `databaseId`. If a database
@@ -593,7 +602,7 @@ write` access to `LVTD-LLC/homebrew-tap`, or an equivalent classic PAT.
 
 ## Safety Rules
 
-- All databases have explicit TTLs.
+- All databases have explicit positive TTLs.
 - Generated role names and database names use a predictable prefix.
 - Agent-created users are not superusers.
 - Destructive tools only operate on resources created by this MCP.
