@@ -282,7 +282,8 @@ It discovers binaries from `PATH`, common package-manager locations,
 After installation and MCP restart, an agent can validate a repo migration
 workflow without using the developer's real database:
 
-1. Call `create_database` with a short `nameHint`, owner, labels, and TTL.
+1. Call `create_database` with a short `nameHint`, owner, labels, and positive
+   TTL.
 2. Optionally call `prepare_for_repo` with the repo path, sandbox id, and an
    explicit `migrationCommand` argv array to store reusable workflow metadata.
 3. Call `validate_schema_change` with the same repo path, sandbox id, and either an

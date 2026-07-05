@@ -334,6 +334,12 @@ profile; mismatches return a structured `version_mismatch` error. Major-only
 version strings such as `"16"`, `"17"`, and `"18"` are canonical, and patch
 strings are normalized to the major.
 
+When passing `ttlMinutes`, use a positive integer number of minutes. Omit it to
+use the profile default. `ttlMinutes: 0` and negative values are rejected with
+`invalid_ttl` so a missing duration variable does not create an immediately
+expired sandbox; values above the profile `maxTtlMinutes` cap are rejected as
+well.
+
 Sandbox `databaseId` lookup works across configured profiles and running
 managed-local profiles when the call provides only `databaseId`. If a database
 id cannot be resolved, the error tells the caller to retry with `profile` or
@@ -587,7 +593,7 @@ write` access to `LVTD-LLC/homebrew-tap`, or an equivalent classic PAT.
 
 ## Safety Rules
 
-- All databases have explicit TTLs.
+- All databases have explicit positive TTLs.
 - Generated role names and database names use a predictable prefix.
 - Agent-created users are not superusers.
 - Destructive tools only operate on resources created by this MCP.

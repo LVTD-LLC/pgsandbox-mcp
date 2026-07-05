@@ -44,7 +44,8 @@ diagnostics may also include `requestedVersion`, `sourceVersion`,
 Typical codes include `undefined_column`, `undefined_table`, `syntax_error`,
 `permission_denied`, `lock_timeout`, `statement_timeout`,
 `postgres_auth_failed`, `postgres_connection_failed`,
-`postgres_version_unavailable`, and `local_postgres_unavailable`.
+`postgres_version_unavailable`, `local_postgres_unavailable`, and
+`invalid_ttl`.
 
 When selecting a local major version, omit `profile` and pass only
 `postgresVersion`, for example `{ "postgresVersion": "18" }`. Supplying both is
@@ -60,7 +61,9 @@ Inputs:
 - `profile`: optional Postgres profile name
 - `postgresVersion`: optional Postgres major version, for example `"16"`
 - `nameHint`: short human-readable purpose
-- `ttlMinutes`: optional TTL, capped by server config
+- `ttlMinutes`: optional positive TTL in minutes, capped by server config.
+  Omit it to use the profile default. `0`, negative values, and values above
+  `maxTtlMinutes` return `code: "invalid_ttl"`.
 - `owner`: optional agent/session identifier
 - `labels`: optional key/value metadata
 
@@ -136,7 +139,9 @@ Inputs:
 - `postgresVersion`: optional target Postgres major version
 - `sourceDatabaseUrl`: source Postgres connection string
 - `nameHint`: short human-readable purpose
-- `ttlMinutes`: optional TTL, capped by server config
+- `ttlMinutes`: optional positive TTL in minutes, capped by server config.
+  Omit it to use the profile default. `0`, negative values, and values above
+  `maxTtlMinutes` return `code: "invalid_ttl"`.
 - `owner`: optional agent/session identifier
 - `labels`: optional key/value metadata
 - `schemaOnly`: optional boolean to clone schema without table data
@@ -486,7 +491,9 @@ Inputs:
 - `databaseId` or `databaseName`: optional; omitted creates a fresh sandbox
 - `command`: optional argv array; defaults to `.pgsandbox/project.json`
 - `timeoutSeconds`
-- `nameHint`, `ttlMinutes`, `owner`, `labels`: used when creating a fresh sandbox
+- `nameHint`, `ttlMinutes`, `owner`, `labels`: used when creating a fresh
+  sandbox. `ttlMinutes` follows the same positive-only validation as
+  `create_database`.
 
 If `databaseId`/`databaseName` is omitted, this tool creates a sandbox and the
 response states `createdSandbox`. Failed validations delete that auto-created
@@ -540,7 +547,8 @@ Inputs:
 - `profile`: optional Postgres profile name
 - `templateName`
 - `nameHint`
-- `ttlMinutes`
+- `ttlMinutes`: optional positive TTL in minutes; omit it to use the profile
+  default
 - `owner`
 - `labels`
 

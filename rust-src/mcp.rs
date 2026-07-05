@@ -739,6 +739,22 @@ impl ToolErrorResponse {
                     "field": "baseDigest"
                 })),
             }
+        } else if lower.contains("invalid_ttl") {
+            ToolErrorBody {
+                code: "invalid_ttl",
+                category: "validation",
+                message: chain,
+                hint: "Pass a positive ttlMinutes value of at least 1 minute, or omit ttlMinutes to use the profile default. Values above maxTtlMinutes are rejected.".to_string(),
+                sqlstate: None,
+                requested_version: None,
+                source_version: None,
+                target_version: None,
+                detected_versions: Vec::new(),
+                detail_handle: Some(json!({
+                    "type": "tool-contract",
+                    "field": "ttlMinutes"
+                })),
+            }
         } else if lower.contains("password authentication failed")
             || lower.contains("authentication failed")
         {
@@ -1153,6 +1169,11 @@ mod tests {
                 "invalid_base_digest",
                 "validation",
             ),
+            (
+                "invalid_ttl: ttlMinutes must be at least 1 minute for profile default",
+                "invalid_ttl",
+                "validation",
+            ),
         ];
 
         for (message, code, category) in cases {
@@ -1163,6 +1184,22 @@ mod tests {
             assert_eq!(value["error"]["code"], code);
             assert_eq!(value["error"]["category"], category);
         }
+    }
+
+    #[test]
+    fn invalid_ttl_tool_error_has_actionable_hint() {
+        let result = tool_json::<()>(Err(anyhow::anyhow!(
+            "invalid_ttl: ttlMinutes must be at least 1 minute for profile default"
+        )))
+        .unwrap();
+        let text = result.content[0].as_text().unwrap().text.clone();
+        let value = serde_json::from_str::<Value>(&text).unwrap();
+
+        assert_eq!(value["error"]["code"], "invalid_ttl");
+        assert!(value["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("positive ttlMinutes"));
     }
 
     #[test]
