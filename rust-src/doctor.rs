@@ -4,12 +4,14 @@ use url::Url;
 
 use crate::{
     config::{admin_url_host, is_local_admin_url, load_config_from_env, SandboxConfig},
+    local::discover_local_postgres_installations,
     postgres::connect_url,
     setup::{detect_existing_client_configs, find_configured_admin_url},
 };
 
 pub struct DoctorResult {
     pub ok: bool,
+    pub available_postgres_versions: Vec<String>,
     pub lines: Vec<String>,
 }
 
@@ -24,6 +26,7 @@ pub async fn run_doctor(
             .map(|path| path.display().to_string())
             .unwrap_or_else(|_| "pgsandbox-mcp".to_string())
     )];
+    let available_postgres_versions = discovered_postgres_versions();
     let mut ok = true;
     let mut configured_admin_url_target = None;
 
@@ -59,7 +62,10 @@ pub async fn run_doctor(
         Ok(config) => Some(config),
         Err(error) => {
             ok = false;
-            lines.push(error.to_string());
+            lines.extend(doctor_config_error_lines(
+                &error.to_string(),
+                &available_postgres_versions,
+            ));
             None
         }
     };
@@ -100,7 +106,82 @@ pub async fn run_doctor(
         }
     }
 
-    DoctorResult { ok, lines }
+    DoctorResult {
+        ok,
+        available_postgres_versions,
+        lines,
+    }
+}
+
+fn discovered_postgres_versions() -> Vec<String> {
+    let mut versions = discover_local_postgres_installations()
+        .into_iter()
+        .map(|installation| installation.postgres_version)
+        .collect::<Vec<_>>();
+    sort_postgres_versions(&mut versions);
+    versions.dedup();
+    versions
+}
+
+fn sort_postgres_versions(versions: &mut [String]) {
+    versions.sort_by(|left, right| {
+        let left_major = left.parse::<u32>().ok();
+        let right_major = right.parse::<u32>().ok();
+        match (left_major, right_major) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            _ => left.cmp(right),
+        }
+    });
+}
+
+fn doctor_config_error_lines(message: &str, available_versions: &[String]) -> Vec<String> {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("could not find local postgres") && lower.contains("binaries") {
+        let requested_version = requested_postgres_version_from_message(message);
+        let mut lines = vec![match requested_version.as_deref() {
+            Some(version) => format!("Local Postgres {version} binaries are unavailable."),
+            None => "Local Postgres binaries are unavailable.".to_string(),
+        }];
+        lines.push(available_versions_line(available_versions));
+        lines.push(match requested_version {
+            Some(version) => format!(
+                "Hint: install PostgreSQL {version} locally, set PGSANDBOX_POSTGRES_{version}_BIN_DIR or PGSANDBOX_POSTGRES_BIN_DIR, or choose an available version."
+            ),
+            None => "Hint: install PostgreSQL locally, set PGSANDBOX_POSTGRES_BIN_DIR, or choose an available version.".to_string(),
+        });
+        return lines;
+    }
+
+    vec![message.to_string()]
+}
+
+fn available_versions_line(available_versions: &[String]) -> String {
+    if available_versions.is_empty() {
+        "Available local Postgres versions: none discovered".to_string()
+    } else {
+        format!(
+            "Available local Postgres versions: {}",
+            available_versions.join(", ")
+        )
+    }
+}
+
+fn requested_postgres_version_from_message(message: &str) -> Option<String> {
+    requested_version_after(message, "local Postgres")
+        .or_else(|| requested_version_after(message, "postgresVersion"))
+}
+
+fn requested_version_after(message: &str, marker: &str) -> Option<String> {
+    message.match_indices(marker).find_map(|(start, _)| {
+        let version = message[start + marker.len()..]
+            .trim_start_matches(|character: char| {
+                character.is_whitespace() || matches!(character, ':' | '=' | '"' | '`')
+            })
+            .chars()
+            .take_while(|character| character.is_ascii_digit())
+            .collect::<String>();
+        (!version.is_empty()).then_some(version)
+    })
 }
 
 async fn check_profiles(config: &SandboxConfig, lines: &mut Vec<String>) -> bool {
@@ -188,5 +269,30 @@ mod tests {
             mask_connection_string("postgres://postgres:secret@localhost:5432/postgres"),
             "postgres://postgres:****@localhost:5432/postgres"
         );
+    }
+
+    #[test]
+    fn compact_local_postgres_errors_omit_probe_paths() {
+        let lines = doctor_config_error_lines(
+            "failed to prepare default local Postgres cluster: could not find local Postgres 99 binaries. Set PGSANDBOX_POSTGRES_99_BIN_DIR or put matching initdb, pg_ctl, and postgres on PATH. Tried: common bin dir /very/long/path/bin: failed; local bin dir /another/path/bin: resolved Postgres 18, not requested 99",
+            &["16".to_string(), "18".to_string()],
+        );
+        let text = lines.join("\n");
+
+        assert!(text.contains("Local Postgres 99 binaries are unavailable."));
+        assert!(text.contains("Available local Postgres versions: 16, 18"));
+        assert!(text.contains("PGSANDBOX_POSTGRES_99_BIN_DIR"));
+        assert!(!text.contains("Tried:"));
+        assert!(!text.contains("/very/long/path"));
+        assert!(!text.contains("/another/path"));
+    }
+
+    #[test]
+    fn discovered_postgres_versions_sort_numerically() {
+        let mut versions = vec!["9".to_string(), "18".to_string(), "16".to_string()];
+
+        sort_postgres_versions(&mut versions);
+
+        assert_eq!(versions, ["9", "16", "18"]);
     }
 }
