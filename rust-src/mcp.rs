@@ -13,10 +13,11 @@ use crate::{
     postgres::{
         CleanupExpiredInput, CloneDatabaseInput, CreateDatabaseInput,
         CreateSandboxFromTemplateInput, CreateSchemaSnapshotInput, CreateTemplateFromSandboxInput,
-        DatabaseSelector, DeleteSchemaSnapshotInput, DeleteTemplateInput, DiffSchemaSnapshotInput,
-        ExplainQueryInput, ListDatabasesInput, ListProfilesInput, ListSchemaSnapshotsInput,
-        ListTemplatesInput, PostgresSandboxManager, PrepareForRepoInput, RunRepoCommandInput,
-        RunSqlInput, SchemaDiffInput, SeedDatabaseInput, ValidateSchemaChangeInput,
+        DatabaseSelector, DeleteSchemaSnapshotInput, DeleteTemplateInput, DescribeSchemaInput,
+        DiffSchemaSnapshotInput, ExplainQueryInput, ListDatabasesInput, ListProfilesInput,
+        ListSchemaSnapshotsInput, ListTemplatesInput, PostgresSandboxManager, PrepareForRepoInput,
+        RunRepoCommandInput, RunSqlInput, SchemaDiffInput, SeedDatabaseInput,
+        ValidateSchemaChangeInput,
     },
     telemetry::{properties, Telemetry, EVENT_MCP_SERVER_STARTED, EVENT_MCP_TOOL_COMPLETED},
 };
@@ -226,9 +227,13 @@ impl PgsandboxServer {
     )]
     async fn describe_schema(
         &self,
-        Parameters(input): Parameters<DatabaseSelector>,
+        Parameters(input): Parameters<DescribeSchemaInput>,
     ) -> Result<CallToolResult, ErrorData> {
-        let event_properties = selector_properties(&input);
+        let mut event_properties = selector_properties(&DatabaseSelector::from(&input));
+        event_properties.insert(
+            "includeLegacyAliases".to_string(),
+            json!(input.include_legacy_aliases.unwrap_or(false)),
+        );
         self.tracked_tool(
             "describe_schema",
             event_properties,

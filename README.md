@@ -482,7 +482,10 @@ example `["npm", "run", "migrate"]`,
 `["psql", "-v", "ON_ERROR_STOP=1", "-f", "migrations/schema.sql"]`, or
 `["psql", "-Atc", "SELECT current_database(), current_user"]`.
 Schema inspection includes relation-kind counts, constraints, column defaults
-and generated expressions, and view definition hashes. `run_sql` returns common
+and generated expressions, view definition hashes, compact canonical field
+names, and semantic constraint types such as `not_null`. `describe_schema` can
+include legacy catalog aliases with `includeLegacyAliases` when compatibility
+requires them. `run_sql` returns common
 Postgres arrays such as `text[]`, integer arrays, `uuid[]`, `jsonb[]`, and
 `timestamptz[]` as JSON arrays. `int8` values, including `count(*)` aggregate
 results, and `numeric` values are serialized as JSON strings to preserve
