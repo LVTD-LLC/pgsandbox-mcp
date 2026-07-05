@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
     process::Stdio,
     sync::LazyLock,
@@ -330,7 +330,7 @@ pub struct ProfileSummary {
     pub source: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateDatabaseOutput {
     pub database_id: String,
@@ -343,7 +343,25 @@ pub struct CreateDatabaseOutput {
     pub connection_string_redacted: String,
 }
 
-#[derive(Debug, Serialize)]
+impl fmt::Debug for CreateDatabaseOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CreateDatabaseOutput")
+            .field("database_id", &self.database_id)
+            .field("profile", &self.profile)
+            .field("database_name", &self.database_name)
+            .field("role_name", &self.role_name)
+            .field("expires_at", &self.expires_at)
+            .field("connection_string", &"<redacted>")
+            .field(
+                "connection_string_redacted",
+                &self.connection_string_redacted,
+            )
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloneDatabaseOutput {
     pub database_id: String,
@@ -356,6 +374,26 @@ pub struct CloneDatabaseOutput {
     pub connection_string_redacted: String,
     pub source: String,
     pub schema_only: bool,
+}
+
+impl fmt::Debug for CloneDatabaseOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CloneDatabaseOutput")
+            .field("database_id", &self.database_id)
+            .field("profile", &self.profile)
+            .field("database_name", &self.database_name)
+            .field("role_name", &self.role_name)
+            .field("expires_at", &self.expires_at)
+            .field("connection_string", &"<redacted>")
+            .field(
+                "connection_string_redacted",
+                &self.connection_string_redacted,
+            )
+            .field("source", &self.source)
+            .field("schema_only", &self.schema_only)
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -783,7 +821,7 @@ pub struct CreateTemplateOutput {
     pub metadata: TemplateMetadata,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSandboxFromTemplateOutput {
     pub database_id: String,
@@ -795,6 +833,25 @@ pub struct CreateSandboxFromTemplateOutput {
     pub connection_string: String,
     pub connection_string_redacted: String,
     pub template_name: String,
+}
+
+impl fmt::Debug for CreateSandboxFromTemplateOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CreateSandboxFromTemplateOutput")
+            .field("database_id", &self.database_id)
+            .field("profile", &self.profile)
+            .field("database_name", &self.database_name)
+            .field("role_name", &self.role_name)
+            .field("expires_at", &self.expires_at)
+            .field("connection_string", &"<redacted>")
+            .field(
+                "connection_string_redacted",
+                &self.connection_string_redacted,
+            )
+            .field("template_name", &self.template_name)
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -7444,6 +7501,54 @@ mod tests {
                 .and_then(Value::as_str),
             Some("postgres://role:****@localhost:5432/sandbox")
         );
+    }
+
+    #[test]
+    fn creation_outputs_debug_redacts_full_connection_strings() {
+        let expires_at = Utc::now();
+        let connection_string = "postgres://role:secret@localhost:5432/sandbox";
+
+        let created = CreateDatabaseOutput {
+            database_id: "db-id".to_string(),
+            profile: "default".to_string(),
+            database_name: "sandbox".to_string(),
+            role_name: "sandbox_role".to_string(),
+            expires_at,
+            connection_string: connection_string.to_string(),
+            connection_string_redacted: mask_connection_string(connection_string),
+        };
+        let cloned = CloneDatabaseOutput {
+            database_id: "db-id".to_string(),
+            profile: "default".to_string(),
+            database_name: "sandbox".to_string(),
+            role_name: "sandbox_role".to_string(),
+            expires_at,
+            connection_string: connection_string.to_string(),
+            connection_string_redacted: mask_connection_string(connection_string),
+            source: "external".to_string(),
+            schema_only: false,
+        };
+        let restored = CreateSandboxFromTemplateOutput {
+            database_id: "db-id".to_string(),
+            profile: "default".to_string(),
+            database_name: "sandbox".to_string(),
+            role_name: "sandbox_role".to_string(),
+            expires_at,
+            connection_string: connection_string.to_string(),
+            connection_string_redacted: mask_connection_string(connection_string),
+            template_name: "seeded".to_string(),
+        };
+
+        for debug_output in [
+            format!("{created:?}"),
+            format!("{cloned:?}"),
+            format!("{restored:?}"),
+        ] {
+            assert!(!debug_output.contains("secret"));
+            assert!(!debug_output.contains(connection_string));
+            assert!(debug_output.contains("connection_string"));
+            assert!(debug_output.contains("<redacted>"));
+        }
     }
 
     #[test]
