@@ -230,20 +230,27 @@ Inputs:
 - `profile`: optional Postgres profile name
 - `postgresVersion`: optional Postgres major version
 - `databaseId` or `databaseName`
+- `includeLegacyAliases`: optional boolean, defaults to false. When true,
+  response objects also include the legacy catalog/source aliases that were
+  previously returned alongside canonical fields.
 
 Returns:
 
-- structured schema summary. Tables and columns include camelCase inspection
-  keys such as `tableName`, `tableSchema`, `columnName`, `dataType`, and
-  `isNullable`, with legacy source column names retained where applicable.
+- structured schema summary with compact canonical camelCase keys such as
+  `tableName`, `tableSchema`, `columnName`, `dataType`, and `isNullable`.
+  Legacy aliases such as `table_name`, `column_default`, `constraint_type`,
+  `schemaname`, and `extname` are returned only when
+  `includeLegacyAliases: true`.
 - `relationCounts`: split counts for `tables`, `partitionedTables`, `views`,
   `materializedViews`, `foreignTables`, and `other`.
 - `tables`: relations with `relationKind` values such as `table`, `view`, and
   `materialized_view`.
 - `columns`: includes `columnDefault`, `generatedKind`, and
   `generationExpression` when Postgres exposes them.
-- `constraints`: primary key, unique, foreign key, check, and exclusion
-  constraints with readable definitions and FK actions when applicable.
+- `constraints`: primary key, unique, foreign key, check, exclusion, and
+  not-null constraints with semantic `constraintType` values such as
+  `primary_key`, `foreign_key`, and `not_null`; includes readable definitions
+  and FK actions when applicable.
 - `views`: view and materialized view definitions.
 - `indexes` and `extensions`.
 
@@ -271,7 +278,9 @@ Returns:
 - object counts for tables, columns, constraints, indexes, and extensions
 - compact tables with relation kind, column type/nullability/default/generated
   metadata, constraint definition hashes, index definition hashes, and view
-  definition hashes
+  definition hashes. Constraint types are semantic values such as
+  `primary_key`, `foreign_key`, and `not_null`, not raw PostgreSQL catalog
+  codes.
 - extensions with versions
 
 ## `schema_diff`
@@ -298,7 +307,7 @@ Example:
   "baseDigest": {
     "databaseId": "6d4b...",
     "databaseName": "pgsandbox_app_abc12345",
-    "digestVersion": 2,
+    "digestVersion": 3,
     "checksum": "...",
     "tableCount": 1,
     "relationCounts": {

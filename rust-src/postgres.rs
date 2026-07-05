@@ -48,7 +48,7 @@ const AUDIT_TABLE: &str = "pgsandbox_events";
 const DEFAULT_ROW_LIMIT: usize = 100;
 const LIST_DATABASES_LIMIT: usize = 100;
 const ENCRYPTED_PASSWORD_PREFIX: &str = "v1";
-const SCHEMA_DIGEST_VERSION: u32 = 2;
+const SCHEMA_DIGEST_VERSION: u32 = 3;
 const MAX_SCHEMA_DIFF_ITEMS: usize = 50;
 const DEFAULT_WORKFLOW_TIMEOUT_SECONDS: u64 = 120;
 const MAX_WORKFLOW_TIMEOUT_SECONDS: u64 = 600;
@@ -107,6 +107,27 @@ pub struct DatabaseSelector {
     pub postgres_version: Option<String>,
     pub database_id: Option<String>,
     pub database_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DescribeSchemaInput {
+    pub profile: Option<String>,
+    pub postgres_version: Option<String>,
+    pub database_id: Option<String>,
+    pub database_name: Option<String>,
+    pub include_legacy_aliases: Option<bool>,
+}
+
+impl From<DescribeSchemaInput> for DatabaseSelector {
+    fn from(input: DescribeSchemaInput) -> Self {
+        Self {
+            profile: input.profile,
+            postgres_version: input.postgres_version,
+            database_id: input.database_id,
+            database_name: input.database_name,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1698,9 +1719,10 @@ impl PostgresSandboxManager {
 
     pub async fn describe_schema(
         &self,
-        input: DatabaseSelector,
+        input: DescribeSchemaInput,
     ) -> anyhow::Result<DescribeSchemaOutput> {
-        let connection = self.get_connection_string(input).await?;
+        let include_legacy_aliases = input.include_legacy_aliases.unwrap_or(false);
+        let connection = self.get_connection_string(input.into()).await?;
         let (client, connection_task) = connect_url(&connection.connection_string).await?;
 
         let tables = client
@@ -1779,6 +1801,7 @@ impl PostgresSandboxManager {
                            WHEN 'f' THEN 'foreign_key'
                            WHEN 'c' THEN 'check'
                            WHEN 'x' THEN 'exclusion'
+                           WHEN 'n' THEN 'not_null'
                            ELSE con.contype::text
                          END AS constraint_type,
                          pg_get_constraintdef(con.oid, true) AS definition,
@@ -1807,6 +1830,7 @@ impl PostgresSandboxManager {
                            WHEN 'f' THEN 'foreign_key'
                            WHEN 'c' THEN 'check'
                            WHEN 'x' THEN 'exclusion'
+                           WHEN 'n' THEN 'not_null'
                            ELSE con.contype::text
                          END AS "constraintType",
                          pg_get_constraintdef(con.oid, true) AS "definition",
@@ -1902,12 +1926,20 @@ impl PostgresSandboxManager {
             database_id: connection.database_id,
             database_name: connection.database_name,
             relation_counts,
-            tables: rows_to_json(tables)?,
-            columns: rows_to_json(columns)?,
-            constraints: rows_to_json(constraints)?,
-            indexes: rows_to_json(indexes)?,
-            views: rows_to_json(views)?,
-            extensions: rows_to_json(extensions)?,
+            tables: schema_rows_to_json(tables, TABLE_LEGACY_ALIASES, include_legacy_aliases)?,
+            columns: schema_rows_to_json(columns, COLUMN_LEGACY_ALIASES, include_legacy_aliases)?,
+            constraints: schema_rows_to_json(
+                constraints,
+                CONSTRAINT_LEGACY_ALIASES,
+                include_legacy_aliases,
+            )?,
+            indexes: schema_rows_to_json(indexes, INDEX_LEGACY_ALIASES, include_legacy_aliases)?,
+            views: schema_rows_to_json(views, VIEW_LEGACY_ALIASES, include_legacy_aliases)?,
+            extensions: schema_rows_to_json(
+                extensions,
+                EXTENSION_LEGACY_ALIASES,
+                include_legacy_aliases,
+            )?,
         })
     }
 
@@ -3465,6 +3497,7 @@ async fn collect_schema_digest(client: &Client) -> anyhow::Result<WorkflowSchema
                        WHEN 'f' THEN 'foreign_key'
                        WHEN 'c' THEN 'check'
                        WHEN 'x' THEN 'exclusion'
+                       WHEN 'n' THEN 'not_null'
                        ELSE con.contype::text
                      END AS constraint_type,
                      pg_get_constraintdef(con.oid, true) AS definition,
@@ -3570,6 +3603,7 @@ async fn collect_schema_digest(client: &Client) -> anyhow::Result<WorkflowSchema
         let table: String = row.get("table_name");
         let name: String = row.get("constraint_name");
         let constraint_type: String = row.get("constraint_type");
+        let constraint_type = normalized_constraint_type(&constraint_type).to_string();
         let definition: String = row.get("definition");
         let update_action: Option<String> = row.get("update_action");
         let delete_action: Option<String> = row.get("delete_action");
@@ -5072,6 +5106,7 @@ async fn schema_digest_for_connection(
                        WHEN 'f' THEN 'foreign_key'
                        WHEN 'c' THEN 'check'
                        WHEN 'x' THEN 'exclusion'
+                       WHEN 'n' THEN 'not_null'
                        ELSE con.contype::text
                      END AS constraint_type,
                      pg_get_constraintdef(con.oid, true) AS definition,
@@ -5180,7 +5215,10 @@ async fn schema_digest_for_connection(
             });
         table.constraints.push(SchemaDigestConstraint {
             name: row.get("constraint_name"),
-            constraint_type: row.get("constraint_type"),
+            constraint_type: {
+                let constraint_type = row.get::<_, String>("constraint_type");
+                normalized_constraint_type(&constraint_type).to_string()
+            },
             definition_hash: sha256_hex(definition.as_bytes()),
             update_action: row.get("update_action"),
             delete_action: row.get("delete_action"),
@@ -5246,6 +5284,113 @@ fn schema_digest_checksum(
 
 fn default_relation_kind() -> String {
     "table".to_string()
+}
+
+const TABLE_LEGACY_ALIASES: &[(&str, &str)] = &[
+    ("table_schema", "tableSchema"),
+    ("table_name", "tableName"),
+    ("relation_kind", "relationKind"),
+];
+
+const COLUMN_LEGACY_ALIASES: &[(&str, &str)] = &[
+    ("table_schema", "tableSchema"),
+    ("table_name", "tableName"),
+    ("column_name", "columnName"),
+    ("data_type", "dataType"),
+    ("is_nullable", "isNullable"),
+    ("column_default", "columnDefault"),
+    ("generated_kind", "generatedKind"),
+    ("generation_expression", "generationExpression"),
+];
+
+const CONSTRAINT_LEGACY_ALIASES: &[(&str, &str)] = &[
+    ("table_schema", "tableSchema"),
+    ("table_name", "tableName"),
+    ("constraint_name", "constraintName"),
+    ("constraint_type", "constraintType"),
+    ("update_action", "updateAction"),
+    ("delete_action", "deleteAction"),
+];
+
+const INDEX_LEGACY_ALIASES: &[(&str, &str)] = &[
+    ("schemaname", "schemaName"),
+    ("tablename", "tableName"),
+    ("indexname", "indexName"),
+    ("indexdef", "definition"),
+];
+
+const VIEW_LEGACY_ALIASES: &[(&str, &str)] = &[
+    ("table_schema", "tableSchema"),
+    ("table_name", "tableName"),
+    ("relation_kind", "relationKind"),
+];
+
+const EXTENSION_LEGACY_ALIASES: &[(&str, &str)] = &[("extname", "name"), ("extversion", "version")];
+
+fn schema_rows_to_json(
+    rows: Vec<Row>,
+    legacy_aliases: &[(&str, &str)],
+    include_legacy_aliases: bool,
+) -> anyhow::Result<Vec<Value>> {
+    rows.iter()
+        .map(|row| {
+            row_to_json(row).map(|value| {
+                canonical_schema_json_object(value, legacy_aliases, include_legacy_aliases)
+            })
+        })
+        .collect()
+}
+
+fn canonical_schema_json_object(
+    value: Value,
+    legacy_aliases: &[(&str, &str)],
+    include_legacy_aliases: bool,
+) -> Value {
+    let Value::Object(mut object) = value else {
+        return value;
+    };
+
+    for (legacy_key, canonical_key) in legacy_aliases {
+        if !object.contains_key(*canonical_key) {
+            if let Some(value) = object.get(*legacy_key).cloned() {
+                object.insert((*canonical_key).to_string(), value);
+            }
+        }
+    }
+
+    normalize_constraint_type_field(&mut object, "constraintType");
+
+    if include_legacy_aliases {
+        for (legacy_key, canonical_key) in legacy_aliases {
+            if let Some(value) = object.get(*canonical_key).cloned() {
+                object.insert((*legacy_key).to_string(), value);
+            }
+        }
+    } else {
+        for (legacy_key, _) in legacy_aliases {
+            object.remove(*legacy_key);
+        }
+    }
+
+    Value::Object(object)
+}
+
+fn normalize_constraint_type_field(object: &mut serde_json::Map<String, Value>, key: &str) {
+    if let Some(Value::String(raw)) = object.get_mut(key) {
+        *raw = normalized_constraint_type(raw).to_string();
+    }
+}
+
+fn normalized_constraint_type(raw: &str) -> &str {
+    match raw {
+        "p" => "primary_key",
+        "u" => "unique",
+        "f" => "foreign_key",
+        "c" => "check",
+        "x" => "exclusion",
+        "n" => "not_null",
+        other => other,
+    }
 }
 
 fn relation_counts_from_rows(rows: &[Row]) -> SchemaRelationCounts {
@@ -7106,6 +7251,54 @@ mod tests {
     }
 
     #[test]
+    fn describe_schema_compacts_to_canonical_fields_by_default() {
+        let compact = canonical_schema_json_object(
+            json!({
+                "table_schema": "public",
+                "table_name": "accounts",
+                "constraint_name": "accounts_email_not_null",
+                "constraint_type": "n",
+                "tableSchema": "public",
+                "tableName": "accounts",
+                "constraintName": "accounts_email_not_null",
+                "constraintType": "n",
+                "definition": "NOT NULL"
+            }),
+            CONSTRAINT_LEGACY_ALIASES,
+            false,
+        );
+
+        assert_eq!(compact["tableSchema"], "public");
+        assert_eq!(compact["tableName"], "accounts");
+        assert_eq!(compact["constraintName"], "accounts_email_not_null");
+        assert_eq!(compact["constraintType"], "not_null");
+        assert!(compact.get("table_schema").is_none());
+        assert!(compact.get("table_name").is_none());
+        assert!(compact.get("constraint_name").is_none());
+        assert!(compact.get("constraint_type").is_none());
+    }
+
+    #[test]
+    fn describe_schema_can_include_normalized_legacy_aliases() {
+        let aliased = canonical_schema_json_object(
+            json!({
+                "table_schema": "public",
+                "table_name": "accounts",
+                "constraint_name": "accounts_email_not_null",
+                "constraint_type": "n",
+                "definition": "NOT NULL"
+            }),
+            CONSTRAINT_LEGACY_ALIASES,
+            true,
+        );
+
+        assert_eq!(aliased["tableSchema"], "public");
+        assert_eq!(aliased["table_schema"], "public");
+        assert_eq!(aliased["constraintType"], "not_null");
+        assert_eq!(aliased["constraint_type"], "not_null");
+    }
+
+    #[test]
     fn unknown_postgres_version_mentions_configured_profile_and_managed_local_repair() {
         let manager = PostgresSandboxManager::new(test_config());
         let error = manager.resolve_profile(None, Some("18")).unwrap_err();
@@ -8171,8 +8364,10 @@ services:
         assert_eq!(error.code, "schema_digest_version_mismatch");
         assert_eq!(error.category, "workflow");
         assert!(error.message.contains("baseline"));
-        assert!(error.message.contains("v1"));
-        assert!(error.message.contains("v2"));
+        assert!(error
+            .message
+            .contains(&format!("v{}", SCHEMA_DIGEST_VERSION - 1)));
+        assert!(error.message.contains(&format!("v{SCHEMA_DIGEST_VERSION}")));
         assert!(error
             .hint
             .unwrap()

@@ -5,9 +5,9 @@ use pgsandbox_mcp::{
     postgres::{
         CloneDatabaseInput, CreateDatabaseInput, CreateSandboxFromTemplateInput,
         CreateSchemaSnapshotInput, CreateTemplateFromSandboxInput, DatabaseSelector,
-        DeleteTemplateInput, DiffSchemaSnapshotInput, ExplainQueryInput, ListDatabasesInput,
-        ListSchemaSnapshotsInput, ListTemplatesInput, PostgresSandboxManager, RunSqlInput,
-        SchemaDiffInput, ValidateSchemaChangeInput,
+        DeleteTemplateInput, DescribeSchemaInput, DiffSchemaSnapshotInput, ExplainQueryInput,
+        ListDatabasesInput, ListSchemaSnapshotsInput, ListTemplatesInput, PostgresSandboxManager,
+        RunSqlInput, SchemaDiffInput, ValidateSchemaChangeInput,
     },
 };
 use serde_json::json;
@@ -207,11 +207,12 @@ async fn run_suite(
         .await?;
 
     let described = manager
-        .describe_schema(DatabaseSelector {
+        .describe_schema(DescribeSchemaInput {
             profile: None,
             postgres_version: None,
             database_id: Some(database_id.to_string()),
             database_name: None,
+            include_legacy_aliases: None,
         })
         .await?;
     assert!(described.relation_counts.tables >= 1);
