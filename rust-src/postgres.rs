@@ -7408,6 +7408,11 @@ mod tests {
             }),
             json!({
                 "tableSchema": "public",
+                "tableName": "accounts_by_region",
+                "relationKind": "partitioned_table"
+            }),
+            json!({
+                "tableSchema": "public",
                 "tableName": "active_accounts",
                 "relationKind": "view",
                 "definition": "SELECT id FROM accounts WHERE active"
@@ -7429,12 +7434,17 @@ mod tests {
             relation_names(&split.relations),
             [
                 "accounts",
+                "accounts_by_region",
                 "active_accounts",
                 "account_rollups",
                 "remote_accounts"
             ]
         );
         assert_eq!(relation_names(&split.tables), ["accounts"]);
+        assert_eq!(
+            relation_names(&split.partitioned_tables),
+            ["accounts_by_region"]
+        );
         assert_eq!(relation_names(&split.views), ["active_accounts"]);
         assert_eq!(
             relation_names(&split.materialized_views),
