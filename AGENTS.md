@@ -111,11 +111,11 @@ npm run package:homebrew
 ## ReviewGate Setup Guidance
 
 - When documenting or helping users set up ReviewGate, configure the actual
-  review job to run only after a PR comment containing exactly
+  review job to run only after a PR comment containing the trigger phrase
   `@reviewgate review` is created. Do not configure the ReviewGate review to run
   automatically on every PR commit through `pull_request` or `synchronize`.
 - The GitHub Actions trigger should use `issue_comment` and guard the PR
-  context, exact trigger phrase, and commenter permission before running the
+  context, trigger phrase, and commenter permission before running the
   ReviewGate action:
 
 ```yaml
@@ -127,7 +127,7 @@ jobs:
   reviewgate:
     if: >
       github.event.issue.pull_request &&
-      github.event.comment.body == '@reviewgate review' &&
+      contains(github.event.comment.body, '@reviewgate review') &&
       (github.event.comment.author_association == 'OWNER' ||
        github.event.comment.author_association == 'MEMBER' ||
        github.event.comment.author_association == 'COLLABORATOR')
