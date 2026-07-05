@@ -124,7 +124,7 @@ async fn pg18_schema_snapshot_minimal_schema_returns_without_timeout_when_enable
         )
         .await
         .map_err(|_| anyhow::anyhow!("create_schema_snapshot timed out on a tiny PG18 schema"))??;
-        assert!(snapshot.ok, "{snapshot:?}");
+        anyhow::ensure!(snapshot.ok, "snapshot was not ok: {snapshot:?}");
 
         let snapshots = manager
             .list_schema_snapshots(ListSchemaSnapshotsInput {
@@ -137,7 +137,11 @@ async fn pg18_schema_snapshot_minimal_schema_returns_without_timeout_when_enable
         let snapshot_summaries = snapshots
             .result
             .ok_or_else(|| anyhow::anyhow!("list_schema_snapshots returned no result"))?;
-        assert_eq!(snapshot_summaries.len(), 1);
+        anyhow::ensure!(
+            snapshot_summaries.len() == 1,
+            "expected 1 snapshot, got {}",
+            snapshot_summaries.len()
+        );
 
         anyhow::Ok(())
     }
