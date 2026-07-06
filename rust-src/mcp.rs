@@ -835,6 +835,22 @@ impl ToolErrorResponse {
                     "field": "ttlMinutes"
                 })),
             }
+        } else if lower.contains("invalid_row_limit") {
+            ToolErrorBody {
+                code: "invalid_row_limit",
+                category: "validation",
+                message: chain,
+                hint: "Pass rowLimit as 0 for a zero-row preview, 1 through 1000 to return rows, or omit rowLimit to use the default of 100. Negative values are rejected; values above 1000 are capped at 1000.".to_string(),
+                sqlstate: None,
+                requested_version: None,
+                source_version: None,
+                target_version: None,
+                detected_versions: Vec::new(),
+                detail_handle: Some(json!({
+                    "type": "tool-contract",
+                    "field": "rowLimit"
+                })),
+            }
         } else if lower.contains("password authentication failed")
             || lower.contains("authentication failed")
         {
@@ -1440,6 +1456,11 @@ mod tests {
                 "invalid_ttl",
                 "validation",
             ),
+            (
+                "invalid_row_limit: rowLimit must be zero or greater",
+                "invalid_row_limit",
+                "validation",
+            ),
         ];
 
         for (message, code, category) in cases {
@@ -1489,6 +1510,42 @@ mod tests {
             .contains("doctor"));
         assert_eq!(value["detailHandles"][0]["tool"], "explain_query");
         assert_eq!(value["detailHandles"][0]["field"], "sql");
+    }
+
+    #[tokio::test]
+    async fn negative_row_limit_tool_error_is_structured_validation() {
+        let mut config = crate::config::parse_config_file(
+            r#"{
+              "defaultProfile": "default",
+              "profiles": [
+                {
+                  "name": "default",
+                  "adminUrl": "postgres://postgres:secret@localhost:5432/postgres?sslmode=disable"
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+        config.telemetry.enabled = false;
+        let server = PgsandboxServer::new(config);
+        let input = serde_json::from_value::<RunSqlInput>(json!({
+            "databaseId": "db-id",
+            "sql": "select generate_series(1, 5) as n",
+            "rowLimit": -1
+        }))
+        .unwrap();
+
+        let result = server.run_sql(Parameters(input)).await.unwrap();
+        let value = tool_payload(result);
+
+        assert_eq!(value["ok"], false);
+        assert_eq!(first_error(&value)["code"], "invalid_row_limit");
+        assert_eq!(first_error(&value)["category"], "validation");
+        assert!(first_error(&value)["hint"]
+            .as_str()
+            .unwrap()
+            .contains("rowLimit"));
+        assert_eq!(value["detailHandles"][0]["field"], "rowLimit");
     }
 
     #[tokio::test]

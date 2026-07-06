@@ -46,6 +46,7 @@ use crate::{
 const METADATA_TABLE: &str = "pgsandbox_databases";
 const AUDIT_TABLE: &str = "pgsandbox_events";
 const DEFAULT_ROW_LIMIT: usize = 100;
+const MAX_ROW_LIMIT: usize = 1000;
 const LIST_DATABASES_LIMIT: usize = 100;
 const ENCRYPTED_PASSWORD_PREFIX: &str = "v1";
 const SCHEMA_DIGEST_VERSION: u32 = 3;
@@ -201,7 +202,10 @@ pub struct RunSqlInput {
     pub database_name: Option<String>,
     pub sql: String,
     pub readonly: Option<bool>,
-    pub row_limit: Option<usize>,
+    #[schemars(
+        description = "Optional max row count. Omit for default 100, pass 0 for a zero-row preview, and pass 1 through 1000 to return rows. Negative values return invalid_row_limit; values above 1000 are capped."
+    )]
+    pub row_limit: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1836,6 +1840,7 @@ impl PostgresSandboxManager {
     }
 
     pub async fn run_sql(&self, input: RunSqlInput) -> anyhow::Result<RunSqlOutput> {
+        let row_limit = normalize_row_limit(input.row_limit)?;
         let connection = self
             .get_connection_string(DatabaseSelector {
                 profile: input.profile.clone(),
@@ -1845,7 +1850,6 @@ impl PostgresSandboxManager {
             })
             .await?;
         let started = std::time::Instant::now();
-        let row_limit = input.row_limit.unwrap_or(DEFAULT_ROW_LIMIT).min(1000);
         let (client, connection_task) = connect_url(&connection.connection_string).await?;
 
         let result = if input.readonly.unwrap_or(false) {
@@ -5996,6 +6000,14 @@ fn clamp_ttl(ttl_minutes: Option<i64>, profile: &SandboxProfile) -> anyhow::Resu
     Ok(ttl_minutes as u32)
 }
 
+fn normalize_row_limit(row_limit: Option<i64>) -> anyhow::Result<usize> {
+    let row_limit = row_limit.unwrap_or(DEFAULT_ROW_LIMIT as i64);
+    if row_limit < 0 {
+        anyhow::bail!("invalid_row_limit: rowLimit must be zero or greater");
+    }
+    Ok((row_limit as usize).min(MAX_ROW_LIMIT))
+}
+
 pub fn assert_safe_readonly_sql(sql: &str) -> anyhow::Result<()> {
     let tokens = sql_keyword_tokens(sql);
     for (index, token) in tokens.iter().enumerate() {
@@ -7791,6 +7803,36 @@ mod tests {
         assert_eq!(clone.ttl_minutes, Some(-1));
         assert_eq!(validate.ttl_minutes, Some(-1));
         assert_eq!(template.ttl_minutes, Some(-1));
+    }
+
+    #[test]
+    fn row_limit_validation_accepts_negative_values_after_deserialization() {
+        let input = serde_json::from_value::<RunSqlInput>(json!({
+            "databaseId": "db-id",
+            "sql": "select generate_series(1, 5) as n",
+            "rowLimit": -1
+        }))
+        .unwrap();
+
+        assert_eq!(input.row_limit, Some(-1));
+    }
+
+    #[test]
+    fn row_limit_validation_rejects_negative_values() {
+        let error = normalize_row_limit(Some(-1)).unwrap_err();
+
+        assert!(error.to_string().contains("invalid_row_limit"));
+        assert!(error
+            .to_string()
+            .contains("rowLimit must be zero or greater"));
+    }
+
+    #[test]
+    fn row_limit_validation_accepts_zero_default_and_caps_large_values() {
+        assert_eq!(normalize_row_limit(Some(0)).unwrap(), 0);
+        assert_eq!(normalize_row_limit(None).unwrap(), DEFAULT_ROW_LIMIT);
+        assert_eq!(normalize_row_limit(Some(2)).unwrap(), 2);
+        assert_eq!(normalize_row_limit(Some(1_001)).unwrap(), 1_000);
     }
 
     #[test]

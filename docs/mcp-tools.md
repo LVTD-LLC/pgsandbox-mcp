@@ -48,7 +48,7 @@ Typical codes include `undefined_column`, `undefined_table`, `syntax_error`,
 `permission_denied`, `lock_timeout`, `statement_timeout`,
 `command_timeout`, `postgres_auth_failed`, `postgres_connection_failed`,
 `unknown_profile`, `postgres_version_unavailable`,
-`local_postgres_unavailable`, and `invalid_ttl`.
+`local_postgres_unavailable`, `invalid_ttl`, and `invalid_row_limit`.
 `explain_query` multi-statement input returns `single_statement_required` with
 category `validation` and a hint to pass exactly one SQL statement.
 
@@ -218,7 +218,10 @@ Inputs:
 - `databaseId` or `databaseName`
 - `sql`
 - `readonly`: optional boolean
-- `rowLimit`: optional max row count, capped at 1000
+- `rowLimit`: optional max row count. Omit it to use the default of 100,
+  pass `0` for a zero-row preview, or pass `1` through `1000` to return rows.
+  Negative values return `code: "invalid_row_limit"` and values above `1000`
+  are capped at `1000`.
 
 Returns:
 
