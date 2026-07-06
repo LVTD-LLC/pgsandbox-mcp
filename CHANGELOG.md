@@ -2,6 +2,7 @@
 
 ## 2026-07-06
 
+- Released `pgsandbox-mcp` v0.4.4 with simplified managed-local onboarding, scoped expired cleanup filters, typed multi-statement `run_sql` result sets, stricter readonly and row-limit validation, classified `explain_query` statement errors, clone-source repair hints, and clearer agent workflow docs.
 - Released `pgsandbox-mcp` v0.4.3 with normalized MCP response envelopes, structured unknown-profile errors, encrypted sandbox role password migration, split schema relation descriptions, tighter repo command timeout hints, compact doctor version diagnostics, and updated ReviewGate setup guidance.
 - Added the Astro Markdown blog post "How to Use Postgres Schema Snapshots for Agent Migration Reviews" with SEO ledger, link inventory, and inbound blog links.
 
