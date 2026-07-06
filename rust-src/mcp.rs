@@ -1119,7 +1119,13 @@ fn source_database_url_error_body(
         ));
     }
 
-    None
+    Some(postgres_error_body(
+        "postgres_connection_failed",
+        "postgres",
+        message,
+        SOURCE_DATABASE_URL_HINT,
+        sqlstate,
+    ))
 }
 
 fn is_source_database_url_context(lower: &str) -> bool {
@@ -1523,6 +1529,21 @@ mod tests {
         assert_eq!(error.code, "permission_denied");
         assert_eq!(error.sqlstate.as_deref(), Some("42501"));
         assert!(error.hint.contains("sourceDatabaseUrl"));
+    }
+
+    #[test]
+    fn clone_source_context_errors_fall_back_to_source_database_url_hint() {
+        let error = source_database_url_error_body(
+            "pg_dump failed: fatal: database \"missing_source\" does not exist",
+            "pg_dump failed: FATAL: database \"missing_source\" does not exist",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(error.code, "postgres_connection_failed");
+        assert_eq!(error.category, "postgres");
+        assert!(error.hint.contains("sourceDatabaseUrl"));
+        assert!(!error.hint.contains("PGSANDBOX_ADMIN_DATABASE_URL"));
     }
 
     #[test]
