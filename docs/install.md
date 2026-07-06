@@ -112,7 +112,11 @@ curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox-mcp/main/scripts
 curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox-mcp/main/scripts/install.sh | PGSANDBOX_INSTALL_DIR=/usr/local/bin sh
 ```
 
-## From Source
+## Install From Source For Development
+
+Normal users should prefer Homebrew or the GitHub release installer above.
+Source installs are for contribution work, testing a local checkout, or
+validating unreleased changes.
 
 ```bash
 cargo install --path .
