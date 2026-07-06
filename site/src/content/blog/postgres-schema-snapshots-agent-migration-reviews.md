@@ -103,7 +103,7 @@ before_pr_1842
 before_payment_status_constraint
 ```
 
-The name matters because agents lose context. A named checkpoint is easier to inspect than "the schema from earlier." The [agent workflow docs](https://pgsandbox-mcp.lvtd.dev/docs/agent-workflows/) show the same pattern: create a schema snapshot before the change, then diff that snapshot after the migration command runs.
+The name matters because agents lose context. A named checkpoint is easier to inspect than "the schema from earlier." The [MCP tool docs](https://pgsandbox-mcp.lvtd.dev/docs/mcp-tools/) show the same pattern: create a schema snapshot before the change, then diff that snapshot after the migration command runs.
 
 A good snapshot response should give the reviewer enough shape without dumping raw catalog output:
 
