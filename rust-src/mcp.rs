@@ -22,6 +22,8 @@ use crate::{
     telemetry::{properties, Telemetry, EVENT_MCP_SERVER_STARTED, EVENT_MCP_TOOL_COMPLETED},
 };
 
+const TOOL_ENVELOPE_MARKER: &str = "__pgsandboxEnvelope";
+
 pub const PUBLIC_MCP_TOOLS: &[&str] = &[
     "list_profiles",
     "create_database",
@@ -677,7 +679,9 @@ fn selector_properties(input: &DatabaseSelector) -> Map<String, Value> {
 fn tool_json<T: Serialize>(result: anyhow::Result<T>) -> Result<CallToolResult, ErrorData> {
     match result {
         Ok(value) => {
-            let text = serde_json::to_string_pretty(&value).map_err(internal_error)?;
+            let payload = serde_json::to_value(value).map_err(internal_error)?;
+            let text = serde_json::to_string_pretty(&normalize_success_payload(payload))
+                .map_err(internal_error)?;
             Ok(CallToolResult::success(vec![Content::text(text)]))
         }
         Err(error) => {
@@ -688,6 +692,51 @@ fn tool_json<T: Serialize>(result: anyhow::Result<T>) -> Result<CallToolResult, 
     }
 }
 
+fn normalize_success_payload(value: Value) -> Value {
+    match value {
+        Value::Object(mut object) => {
+            if remove_tool_envelope_marker(&mut object) {
+                normalize_marked_envelope(object)
+            } else {
+                wrap_success_payload(Value::Object(object))
+            }
+        }
+        value => wrap_success_payload(value),
+    }
+}
+
+fn remove_tool_envelope_marker(object: &mut Map<String, Value>) -> bool {
+    object
+        .remove(TOOL_ENVELOPE_MARKER)
+        .and_then(|value| value.as_bool())
+        == Some(true)
+}
+
+fn normalize_marked_envelope(mut object: Map<String, Value>) -> Value {
+    object
+        .entry("warnings".to_string())
+        .or_insert_with(|| json!([]));
+    object
+        .entry("errors".to_string())
+        .or_insert_with(|| json!([]));
+    object
+        .entry("detailHandles".to_string())
+        .or_insert_with(|| json!([]));
+    object.remove("createdSandbox");
+    Value::Object(object)
+}
+
+fn wrap_success_payload(value: Value) -> Value {
+    json!({
+        "ok": true,
+        "summary": "Tool completed successfully.",
+        "warnings": [],
+        "errors": [],
+        "detailHandles": [],
+        "result": value
+    })
+}
+
 fn internal_error(error: impl std::fmt::Display) -> ErrorData {
     ErrorData::internal_error(error.to_string(), None)
 }
@@ -696,7 +745,10 @@ fn internal_error(error: impl std::fmt::Display) -> ErrorData {
 #[serde(rename_all = "camelCase")]
 struct ToolErrorResponse {
     ok: bool,
-    error: ToolErrorBody,
+    summary: &'static str,
+    warnings: Vec<String>,
+    errors: Vec<ToolErrorBody>,
+    detail_handles: Vec<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -731,6 +783,25 @@ impl ToolErrorResponse {
         } else if let Some(body) = stringly_sql_error_body(&lower, &chain) {
             // Fallback for Postgres-shaped messages when no typed DbError is in the chain.
             body
+        } else if lower.contains("basedigest string must contain")
+            || lower.contains("basedigest must be a schema_digest result")
+        {
+            ToolErrorBody {
+                code: "invalid_base_digest",
+                category: "validation",
+                message: chain,
+                hint: "Pass baseDigest as the schema_digest result object, the full MCP envelope containing it, or a JSON string containing either shape. A checksum alone cannot compute a diff; use schema snapshots for compact stored baselines.".to_string(),
+                sqlstate: None,
+                requested_version: None,
+                source_version: None,
+                target_version: None,
+                detected_versions: Vec::new(),
+                detail_handle: Some(json!({
+                    "type": "tool-contract",
+                    "tool": "schema_diff",
+                    "field": "baseDigest"
+                })),
+            }
         } else if lower.contains("invalid_ttl") {
             ToolErrorBody {
                 code: "invalid_ttl",
@@ -917,9 +988,15 @@ impl ToolErrorResponse {
             }
         };
 
+        let mut body = body;
+        let detail_handles = body.detail_handle.take().into_iter().collect();
+
         Self {
             ok: false,
-            error: body,
+            summary: "Tool failed.",
+            warnings: Vec::new(),
+            errors: vec![body],
+            detail_handles,
         }
     }
 }
@@ -1120,6 +1197,166 @@ fn sanitize_error_token(token: &str) -> String {
 mod tests {
     use super::*;
 
+    fn tool_payload(result: CallToolResult) -> Value {
+        let text = result.content[0].as_text().unwrap().text.clone();
+        serde_json::from_str::<Value>(&text).unwrap()
+    }
+
+    fn first_error(value: &Value) -> &Value {
+        &value["errors"][0]
+    }
+
+    #[test]
+    fn success_responses_use_canonical_envelope_for_direct_payloads() {
+        let cases = [
+            (
+                "create_database lifecycle response",
+                json!({
+                    "databaseId": "db-id",
+                    "databaseName": "pgsandbox_task_abc123",
+                    "roleName": "pgsandbox_task_abc123_role",
+                    "expiresAt": "2026-07-05T12:00:00Z",
+                    "connectionStringRedacted": "postgres://role:****@localhost:5432/pgsandbox_task_abc123"
+                }),
+                ("databaseId", json!("db-id")),
+            ),
+            (
+                "delete_database lifecycle response",
+                json!({
+                    "databaseId": "db-id",
+                    "databaseName": "pgsandbox_task_abc123",
+                    "deleted": true
+                }),
+                ("deleted", json!(true)),
+            ),
+            (
+                "run_sql SQL response",
+                json!({
+                    "databaseId": "db-id",
+                    "databaseName": "pgsandbox_task_abc123",
+                    "returnedRowCount": 1,
+                    "rows": [{"count": "3"}],
+                    "truncated": false,
+                    "elapsedMs": 12
+                }),
+                ("returnedRowCount", json!(1)),
+            ),
+            (
+                "schema_diff schema response",
+                json!({
+                    "databaseId": "db-id",
+                    "databaseName": "pgsandbox_task_abc123",
+                    "beforeChecksum": "before",
+                    "afterChecksum": "after",
+                    "changed": true,
+                    "addedTables": ["public.accounts"],
+                    "removedTables": [],
+                    "changedTables": [],
+                    "addedExtensions": [],
+                    "removedExtensions": [],
+                    "changedExtensions": []
+                }),
+                ("changed", json!(true)),
+            ),
+        ];
+
+        for (label, payload, (expected_key, expected_value)) in cases {
+            let value = tool_payload(tool_json::<Value>(Ok(payload)).unwrap());
+
+            assert_eq!(value["ok"], true, "{label}");
+            assert_eq!(value["summary"], "Tool completed successfully.", "{label}");
+            assert_eq!(value["warnings"], json!([]), "{label}");
+            assert_eq!(value["errors"], json!([]), "{label}");
+            assert_eq!(value["detailHandles"], json!([]), "{label}");
+            assert_eq!(value["result"][expected_key], expected_value, "{label}");
+            assert!(
+                value.get(expected_key).is_none(),
+                "{label} leaked direct payload fields at the top level"
+            );
+        }
+    }
+
+    #[test]
+    fn envelope_shaped_domain_payloads_are_wrapped_without_marker() {
+        let value = tool_payload(
+            tool_json::<Value>(Ok(json!({
+                "ok": true,
+                "summary": "domain object",
+                "result": {"nested": true}
+            })))
+            .unwrap(),
+        );
+
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["summary"], "Tool completed successfully.");
+        assert_eq!(value["warnings"], json!([]));
+        assert_eq!(value["errors"], json!([]));
+        assert_eq!(value["detailHandles"], json!([]));
+        assert_eq!(value["result"]["summary"], "domain object");
+        assert_eq!(value["result"]["result"]["nested"], true);
+    }
+
+    #[test]
+    fn workflow_template_responses_keep_warnings_discoverable_without_aliases() {
+        let value = tool_payload(
+            tool_json::<Value>(Ok(json!({
+                "__pgsandboxEnvelope": true,
+                "ok": true,
+                "summary": "Sandbox created from template `seeded`.",
+                "changedObjects": null,
+                "warnings": ["Template artifacts may contain copied data."],
+                "errors": [],
+                "detailHandles": [{"type": "template", "templateName": "seeded"}],
+                "result": {
+                    "databaseId": "db-id",
+                    "databaseName": "pgsandbox_seeded_abc123",
+                    "templateName": "seeded"
+                },
+                "createdSandbox": {
+                    "databaseId": "db-id",
+                    "databaseName": "pgsandbox_seeded_abc123",
+                    "templateName": "seeded"
+                }
+            })))
+            .unwrap(),
+        );
+
+        assert_eq!(value["ok"], true);
+        assert_eq!(
+            value["warnings"],
+            json!(["Template artifacts may contain copied data."])
+        );
+        assert_eq!(value["errors"], json!([]));
+        assert_eq!(value["detailHandles"][0]["type"], "template");
+        assert_eq!(value["result"]["templateName"], "seeded");
+        assert!(value.get("__pgsandboxEnvelope").is_none());
+        assert!(
+            value.get("createdSandbox").is_none(),
+            "createdSandbox is a legacy alias; canonical data belongs under result"
+        );
+    }
+
+    #[test]
+    fn failure_responses_use_the_same_envelope_shape() {
+        let value = tool_payload(
+            tool_json::<()>(Err(anyhow::anyhow!(
+                "db error: ERROR: syntax error at or near \"fromm\""
+            )))
+            .unwrap(),
+        );
+
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["summary"], "Tool failed.");
+        assert_eq!(value["warnings"], json!([]));
+        assert_eq!(value["errors"][0]["code"], "syntax_error");
+        assert_eq!(value["errors"][0]["category"], "sql_syntax");
+        assert_eq!(value["detailHandles"], json!([]));
+        assert!(
+            value.get("error").is_none(),
+            "canonical failure responses expose errors[], not error"
+        );
+    }
+
     #[test]
     fn tool_errors_are_structured_and_actionable() {
         let result = tool_json::<()>(Err(anyhow::anyhow!(
@@ -1132,9 +1369,11 @@ mod tests {
         let value = serde_json::from_str::<Value>(&text).unwrap();
 
         assert_eq!(value["ok"], false);
-        assert_eq!(value["error"]["code"], "postgres_auth_failed");
-        assert_eq!(value["error"]["category"], "postgres");
-        assert!(value["error"]["hint"]
+        assert_eq!(value["summary"], "Tool failed.");
+        assert_eq!(value["warnings"], json!([]));
+        assert_eq!(first_error(&value)["code"], "postgres_auth_failed");
+        assert_eq!(first_error(&value)["category"], "postgres");
+        assert!(first_error(&value)["hint"]
             .as_str()
             .unwrap()
             .contains("pgsandbox-mcp doctor"));
@@ -1191,8 +1430,8 @@ mod tests {
             let text = result.content[0].as_text().unwrap().text.clone();
             let value = serde_json::from_str::<Value>(&text).unwrap();
 
-            assert_eq!(value["error"]["code"], code);
-            assert_eq!(value["error"]["category"], category);
+            assert_eq!(first_error(&value)["code"], code);
+            assert_eq!(first_error(&value)["category"], category);
         }
     }
 
@@ -1205,8 +1444,8 @@ mod tests {
         let text = result.content[0].as_text().unwrap().text.clone();
         let value = serde_json::from_str::<Value>(&text).unwrap();
 
-        assert_eq!(value["error"]["code"], "invalid_ttl");
-        assert!(value["error"]["hint"]
+        assert_eq!(first_error(&value)["code"], "invalid_ttl");
+        assert!(first_error(&value)["hint"]
             .as_str()
             .unwrap()
             .contains("positive ttlMinutes"));
@@ -1250,23 +1489,23 @@ mod tests {
 
         assert!(result.is_error.unwrap_or(false));
         assert_eq!(value["ok"], false);
-        assert_eq!(value["error"]["code"], "unknown_profile");
-        assert_eq!(value["error"]["category"], "validation");
+        assert_eq!(first_error(&value)["code"], "unknown_profile");
+        assert_eq!(first_error(&value)["category"], "validation");
         assert_eq!(
-            value["error"]["detailHandle"]["invalidProfile"],
+            value["detailHandles"][0]["invalidProfile"],
             "does-not-exist"
         );
-        assert!(value["error"]["hint"]
+        assert!(first_error(&value)["hint"]
             .as_str()
             .unwrap()
             .contains("list_profiles"));
-        assert_eq!(value["error"]["detailHandle"]["tool"], "list_profiles");
+        assert_eq!(value["detailHandles"][0]["tool"], "list_profiles");
         assert_eq!(
-            value["error"]["detailHandle"]["knownProfiles"],
+            value["detailHandles"][0]["knownProfiles"],
             json!(["default", "analytics"])
         );
         assert!(
-            value["error"]["detailHandle"]["knownProfiles"]
+            value["detailHandles"][0]["knownProfiles"]
                 .as_array()
                 .unwrap()
                 .len()
@@ -1289,12 +1528,9 @@ mod tests {
         let value = serde_json::from_str::<Value>(&text).unwrap();
 
         assert!(result.is_error.unwrap_or(false));
-        assert_eq!(value["error"]["code"], "unknown_profile");
-        assert_eq!(value["error"]["category"], "validation");
-        assert_eq!(
-            value["error"]["detailHandle"]["invalidProfile"],
-            "syntax error"
-        );
+        assert_eq!(first_error(&value)["code"], "unknown_profile");
+        assert_eq!(first_error(&value)["category"], "validation");
+        assert_eq!(value["detailHandles"][0]["invalidProfile"], "syntax error");
     }
 
     #[test]
@@ -1321,14 +1557,14 @@ mod tests {
         let text = result.content[0].as_text().unwrap().text.clone();
         let value = serde_json::from_str::<Value>(&text).unwrap();
 
-        assert_eq!(value["error"]["code"], "local_postgres_unavailable");
-        assert_eq!(value["error"]["requestedVersion"], "15");
+        assert_eq!(first_error(&value)["code"], "local_postgres_unavailable");
+        assert_eq!(first_error(&value)["requestedVersion"], "15");
         assert_eq!(
-            value["error"]["message"],
+            first_error(&value)["message"],
             "Local Postgres 15 binaries are unavailable."
         );
-        assert!(value["error"]["detectedVersions"].is_array());
-        assert!(value["error"]["detailHandle"].is_object());
+        assert!(first_error(&value)["detectedVersions"].is_array());
+        assert!(value["detailHandles"][0].is_object());
         assert!(!text.contains("/very/long/path"));
     }
 
@@ -1341,10 +1577,10 @@ mod tests {
         let text = result.content[0].as_text().unwrap().text.clone();
         let value = serde_json::from_str::<Value>(&text).unwrap();
 
-        assert_eq!(value["error"]["code"], "restore_incompatible");
-        assert_eq!(value["error"]["requestedVersion"], "16");
-        assert_eq!(value["error"]["sourceVersion"], "18");
-        assert_eq!(value["error"]["targetVersion"], "16");
+        assert_eq!(first_error(&value)["code"], "restore_incompatible");
+        assert_eq!(first_error(&value)["requestedVersion"], "16");
+        assert_eq!(first_error(&value)["sourceVersion"], "18");
+        assert_eq!(first_error(&value)["targetVersion"], "16");
     }
 
     #[test]
