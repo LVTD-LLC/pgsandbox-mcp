@@ -640,7 +640,9 @@ admin connection.
 Result behavior:
 
 - default `rowLimit`: `100`
+- `rowLimit: 0`: valid zero-row preview
 - hard row limit cap: `1000`
+- negative `rowLimit` values return `invalid_row_limit`
 - returns `returnedRowCount`
 - returns `affectedRowCount` for DML/DDL command tags when available
 - reports `totalRowCountKnown`
@@ -1527,7 +1529,9 @@ Or store a secret-free default:
 
 ### SQL Results Are Truncated
 
-`run_sql` defaults to 100 rows and caps `rowLimit` at 1000.
+`run_sql` defaults to 100 rows, accepts `rowLimit: 0` for a zero-row preview,
+rejects negative `rowLimit` values with `invalid_row_limit`, and caps
+`rowLimit` at 1000.
 
 ```json
 {
