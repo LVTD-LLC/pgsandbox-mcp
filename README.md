@@ -616,6 +616,7 @@ Postgres errors include SQLSTATE when available.
 | `list_profiles` | List configured profiles and discovered local Postgres versions. |
 | `ensure_postgres` | Install missing local Postgres server binaries with a supported package manager when available, then start a managed local profile. |
 | `doctor` | Return MCP-safe diagnostics and profile health. |
+| `list_extensions` | List available extensions for a profile and installed extensions for an existing sandbox. |
 | `create_database` | Create one isolated sandbox database and role, optionally installing requested extensions. |
 | `clone_database` | Clone an existing source database into a new sandbox with `pg_dump`/`pg_restore`, optionally installing target extensions and skipping source-only extension entries. |
 | `delete_database` | Delete a metadata-owned sandbox database and role. |
@@ -642,7 +643,28 @@ Postgres errors include SQLSTATE when available.
 
 See [docs/mcp-tools.md](docs/mcp-tools.md) for full tool inputs and outputs.
 
-### Extension Installation
+### Extension Discovery And Installation
+
+Use `list_extensions` before creating or cloning when an app depends on
+Postgres extensions:
+
+```json
+{ "postgresVersion": "18" }
+```
+
+For an existing sandbox, pass `databaseId` or `databaseName` to also return
+installed extension names and versions:
+
+```json
+{ "databaseName": "pgsandbox_example_abc123" }
+```
+
+The CLI exposes the same discovery path and prints JSON:
+
+```bash
+pgsandbox-mcp list-extensions --postgres-version 18
+pgsandbox-mcp list-extensions --database-name pgsandbox_example_abc123
+```
 
 `create_database` and `clone_database` accept an optional `extensions` list:
 
@@ -681,6 +703,11 @@ restoring the rest of the schema:
 Use `extensions` for target extensions that should exist in the sandbox, and
 `excludeSourceExtensions` for source extension entries that should be omitted
 from the restore archive.
+
+Some extensions require server-level setup such as installed extension packages
+or `shared_preload_libraries`. Those failures return
+`extension_setup_required`; use profile setup docs or a recipe for that profile
+instead of adding a one-off MCP tool for the extension.
 
 ### SQL Execution
 
@@ -1184,8 +1211,9 @@ PGSANDBOX_RUN_SQL_READONLY_E2E=1 \
   -- --nocapture
 ```
 
-Run the extension installation E2E test. It uses `pg_trgm` by default; override
-the extension name when a target profile exposes a different extension package:
+Run the extension discovery and installation E2E test. It uses `pg_trgm` by
+default; override the extension name when a target profile exposes a different
+extension package:
 
 ```bash
 PGSANDBOX_EXTENSION_E2E=1 \

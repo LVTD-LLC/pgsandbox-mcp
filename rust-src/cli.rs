@@ -16,7 +16,10 @@ use crate::{
         LocalPostgresEnsureResult,
     },
     mcp::serve_stdio,
-    postgres::{CreateDatabaseInput, DatabaseSelector, PostgresSandboxManager, RunSqlInput},
+    postgres::{
+        CreateDatabaseInput, DatabaseSelector, ListExtensionsInput, PostgresSandboxManager,
+        RunSqlInput,
+    },
     setup::{
         build_launch_config, config_snippet, parse_client, parse_scope, resolve_targets,
         write_client_config,
@@ -49,6 +52,10 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<u8> {
             print_help();
             Ok(0)
         }
+        "list-extensions" if has_help_flag(&rest) => {
+            print_help();
+            Ok(0)
+        }
         "ensure-postgres" if has_help_flag(&rest) => {
             print_help();
             Ok(0)
@@ -67,6 +74,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<u8> {
         }
         "setup" => setup(&rest).await,
         "doctor" => doctor(&rest).await,
+        "list-extensions" => list_extensions(&rest).await,
         "ensure-postgres" => ensure_postgres(&rest).await,
         "upgrade" => upgrade(&rest).await,
         "local" => local(&rest).await,
@@ -175,6 +183,102 @@ async fn doctor(args: &[String]) -> anyhow::Result<u8> {
         )
         .await;
     Ok(code)
+}
+
+async fn list_extensions(args: &[String]) -> anyhow::Result<u8> {
+    let started = std::time::Instant::now();
+    let options = parse_options(args)?;
+    let env = if options.contains_key("admin-url") || options.contains_key("postgres-version") {
+        let mut env = std::env::vars().collect::<Vec<_>>();
+        if let Some(admin_url) = options.get("admin-url") {
+            env.push((
+                "PGSANDBOX_ADMIN_DATABASE_URL".to_string(),
+                admin_url.to_string(),
+            ));
+        }
+        if let Some(postgres_version) = options.get("postgres-version") {
+            env.push((
+                "PGSANDBOX_POSTGRES_VERSION".to_string(),
+                postgres_version.to_string(),
+            ));
+        }
+        Some(env)
+    } else {
+        None
+    };
+    let config = match env {
+        Some(env) => load_config_from_env(env)?,
+        None => load_config()?,
+    };
+    let telemetry = Telemetry::new(config.telemetry.clone());
+    let manager = PostgresSandboxManager::new(config);
+    let input = ListExtensionsInput {
+        profile: options.get("profile").cloned(),
+        postgres_version: options.get("postgres-version").cloned(),
+        database_id: options.get("database-id").cloned(),
+        database_name: options.get("database-name").cloned(),
+    };
+    let has_database_selector = input.database_id.is_some() || input.database_name.is_some();
+
+    let result = manager.list_extensions(input).await;
+    match result {
+        Ok(output) => println!("{}", serde_json::to_string_pretty(&output)?),
+        Err(error) => {
+            telemetry
+                .capture(
+                    crate::telemetry::EVENT_CLI_COMMAND_COMPLETED,
+                    properties([
+                        ("command", serde_json::json!("list-extensions")),
+                        (
+                            "hasProfile",
+                            serde_json::json!(options.contains_key("profile")),
+                        ),
+                        (
+                            "hasPostgresVersion",
+                            serde_json::json!(options.contains_key("postgres-version")),
+                        ),
+                        (
+                            "hasDatabaseSelector",
+                            serde_json::json!(has_database_selector),
+                        ),
+                        ("success", serde_json::json!(false)),
+                        (
+                            "elapsedMs",
+                            serde_json::json!(started.elapsed().as_millis()),
+                        ),
+                    ]),
+                )
+                .await;
+            return Err(error);
+        }
+    }
+
+    telemetry
+        .capture(
+            crate::telemetry::EVENT_CLI_COMMAND_COMPLETED,
+            properties([
+                ("command", serde_json::json!("list-extensions")),
+                (
+                    "hasProfile",
+                    serde_json::json!(options.contains_key("profile")),
+                ),
+                (
+                    "hasPostgresVersion",
+                    serde_json::json!(options.contains_key("postgres-version")),
+                ),
+                (
+                    "hasDatabaseSelector",
+                    serde_json::json!(has_database_selector),
+                ),
+                ("success", serde_json::json!(true)),
+                (
+                    "elapsedMs",
+                    serde_json::json!(started.elapsed().as_millis()),
+                ),
+            ]),
+        )
+        .await;
+    Ok(0)
 }
 
 async fn ensure_postgres(args: &[String]) -> anyhow::Result<u8> {
@@ -1176,6 +1280,7 @@ Usage:
   pgsandbox-mcp stdio                Start the MCP server over stdio
   pgsandbox-mcp setup [options]      Check and start managed local Postgres, then write MCP client config
   pgsandbox-mcp doctor [options]     Check config and Postgres connectivity
+  pgsandbox-mcp list-extensions [options] List available profile extensions and installed sandbox extensions
   pgsandbox-mcp ensure-postgres      Install missing Postgres binaries when possible, then start managed local Postgres
   pgsandbox-mcp upgrade [options]    Upgrade the binary, then run setup all and doctor
   pgsandbox-mcp local init [options] Initialize the managed local Postgres cluster
@@ -1197,6 +1302,13 @@ Postgres ensure options:
   --postgres-version <major>          Managed local Postgres version, for example 13
   --no-install                        Do not install missing Postgres binaries
   --dry-run                           Print what would be checked or installed
+
+Extension discovery options:
+  --profile <profile>                 Target a configured profile
+  --postgres-version <major>          Target a managed local Postgres version
+  --database-id <id>                  Include installed extensions for a sandbox id
+  --database-name <name>              Include installed extensions for a sandbox name
+  --admin-url <url>                   Temporary admin Postgres URL for this command
 
 Local options:
   --postgres-version <major>          Managed local Postgres version, for example 13
@@ -1276,6 +1388,15 @@ mod tests {
         assert!(help.contains("pgsandbox-mcp ensure-postgres"));
         assert!(help.contains("--no-install"));
         assert!(help.contains("--install-missing"));
+    }
+
+    #[test]
+    fn help_text_lists_extension_discovery_command() {
+        let help = help_text();
+
+        assert!(help.contains("pgsandbox-mcp list-extensions [options]"));
+        assert!(help.contains("--database-id <id>"));
+        assert!(help.contains("--database-name <name>"));
     }
 
     #[test]

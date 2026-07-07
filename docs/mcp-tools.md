@@ -53,8 +53,8 @@ Typical codes include `undefined_column`, `undefined_table`, `syntax_error`,
 `permission_denied`, `lock_timeout`, `statement_timeout`,
 `command_timeout`, `postgres_auth_failed`, `postgres_connection_failed`,
 `unknown_profile`, `postgres_version_unavailable`,
-`local_postgres_unavailable`, `invalid_ttl`, `invalid_extensions`, and
-`invalid_row_limit`.
+`local_postgres_unavailable`, `invalid_ttl`, `invalid_extensions`,
+`extension_setup_required`, and `invalid_row_limit`.
 `explain_query` multi-statement input returns `single_statement_required` with
 category `validation` and a hint to pass exactly one SQL statement.
 
@@ -100,7 +100,9 @@ role connection, not the admin connection. PGSandbox checks
 `pg_available_extensions` in the target sandbox first, so availability depends
 on the selected profile's Postgres installation and extension packages. If any
 requested extension is invalid, unavailable, or fails to install, creation is
-rolled back by dropping the new database and role.
+rolled back by dropping the new database and role. Extensions that need
+server-level Postgres setup, such as package installation or preload
+configuration, return `code: "extension_setup_required"`.
 
 ## `list_profiles`
 
@@ -128,6 +130,45 @@ Use `includeDiscoveredLocal: true` before requesting a `postgresVersion`. The
 requested major must be installed locally, prepared with `ensure_postgres`, or
 supplied through `PGSANDBOX_POSTGRES_BIN_DIR` or
 `PGSANDBOX_POSTGRES_<MAJOR>_BIN_DIR`.
+
+## `list_extensions`
+
+Lists Postgres extensions for a profile or sandbox.
+
+Use this before `create_database` or `clone_database` when an app may need
+extensions such as `pgcrypto`, `pg_trgm`, `uuid-ossp`, `vector`, or
+`pg_stat_statements`. The tool is generic: it reports Postgres catalog state
+and does not add per-extension MCP tools.
+
+Inputs:
+
+- `profile`: optional Postgres profile name
+- `postgresVersion`: optional Postgres major version
+- `databaseId`: optional sandbox id. When present, the response also includes
+  installed extensions for that sandbox.
+- `databaseName`: optional sandbox database name. Alternative to `databaseId`.
+
+Returns:
+
+- `scope`: `profile` when no sandbox selector is supplied, otherwise `sandbox`
+- `profile` and `resolvedProfile`
+- `resolvedPostgresVersion`
+- `databaseId` and `databaseName` when scoped to a sandbox
+- `availableExtensions`: entries from `pg_available_extensions` with `name`,
+  `defaultVersion`, optional `installedVersion`, and `comment`
+- `installedExtensions`: installed sandbox extension objects with `name` and
+  `version`; empty for profile-only discovery
+
+Profile-only discovery connects to the selected profile and reports available
+extensions before sandbox creation. Sandbox-scoped discovery resolves a
+PGSandbox-owned database from metadata, connects with the sandbox role, and
+reports both available and installed extensions.
+
+When `create_database` or `clone_database` requests an unavailable extension,
+the failure code is `invalid_extensions`. When Postgres reports that the
+extension requires server-level configuration, the failure code is
+`extension_setup_required`; use profile setup docs or recipes for those cases
+instead of adding an extension-specific MCP tool.
 
 ## `ensure_postgres`
 

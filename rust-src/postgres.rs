@@ -188,6 +188,15 @@ pub struct DatabaseSelector {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct ListExtensionsInput {
+    pub profile: Option<String>,
+    pub postgres_version: Option<String>,
+    pub database_id: Option<String>,
+    pub database_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectionStringInput {
     pub profile: Option<String>,
     pub postgres_version: Option<String>,
@@ -479,6 +488,35 @@ pub struct ProfileSummary {
     pub managed_local: bool,
     pub admin_url: String,
     pub source: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListExtensionsOutput {
+    pub scope: String,
+    pub profile: String,
+    pub resolved_profile: String,
+    pub resolved_postgres_version: String,
+    pub database_id: Option<String>,
+    pub database_name: Option<String>,
+    pub available_extensions: Vec<AvailableExtensionSummary>,
+    pub installed_extensions: Vec<InstalledExtensionSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableExtensionSummary {
+    pub name: String,
+    pub default_version: Option<String>,
+    pub installed_version: Option<String>,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledExtensionSummary {
+    pub name: String,
+    pub version: String,
 }
 
 #[derive(Serialize)]
@@ -1464,6 +1502,83 @@ impl PostgresSandboxManager {
             hints: list_profile_hints(&self.config),
             profiles,
         })
+    }
+
+    pub async fn list_extensions(
+        &self,
+        input: ListExtensionsInput,
+    ) -> anyhow::Result<ListExtensionsOutput> {
+        let ListExtensionsInput {
+            profile,
+            postgres_version,
+            database_id,
+            database_name,
+        } = input;
+
+        if selector_has_database(&database_id, &database_name) {
+            let (profile, record) = self
+                .get_owned_record(profile, postgres_version, database_id, database_name)
+                .await?;
+            let connection_string = build_connection_string(
+                &profile.admin_url,
+                &record.database_name,
+                &record.role_name,
+                &unprotect_role_password(&record.role_password, &profile)?,
+            )?;
+            let (client, connection_task) = connect_url(&connection_string).await?;
+            let result = async {
+                let resolved_postgres_version =
+                    postgres_major_for_connected_profile(&profile, &client).await?;
+                let available_extensions = list_available_extensions(&client, true).await?;
+                let installed_extensions = list_installed_extensions(&client).await?;
+
+                anyhow::Ok(ListExtensionsOutput {
+                    scope: "sandbox".to_string(),
+                    profile: profile.name.clone(),
+                    resolved_profile: profile.name.clone(),
+                    resolved_postgres_version,
+                    database_id: Some(record.database_id.clone()),
+                    database_name: Some(record.database_name.clone()),
+                    available_extensions,
+                    installed_extensions,
+                })
+            }
+            .await;
+
+            drop(client);
+            let _ = connection_task.await;
+            return result;
+        }
+
+        let profile = self.resolve_profile(profile.as_deref(), postgres_version.as_deref())?;
+        let target_context = ResolvedTargetContext::from_profile("list_extensions", &profile);
+        let (client, connection_task) = connect_admin(&profile)
+            .await
+            .with_context(|| target_context.clone())?;
+        let result = async {
+            let resolved_postgres_version = postgres_major_for_connected_profile(&profile, &client)
+                .await
+                .with_context(|| target_context.clone())?;
+            let available_extensions = list_available_extensions(&client, false)
+                .await
+                .with_context(|| target_context.clone())?;
+
+            anyhow::Ok(ListExtensionsOutput {
+                scope: "profile".to_string(),
+                profile: profile.name.clone(),
+                resolved_profile: profile.name.clone(),
+                resolved_postgres_version,
+                database_id: None,
+                database_name: None,
+                available_extensions,
+                installed_extensions: Vec::new(),
+            })
+        }
+        .await;
+
+        drop(client);
+        let _ = connection_task.await;
+        result
     }
 
     async fn get_owned_record(
@@ -6013,6 +6128,59 @@ fn build_connection_string(
     Ok(url.to_string())
 }
 
+async fn list_available_extensions(
+    client: &Client,
+    include_installed_version: bool,
+) -> anyhow::Result<Vec<AvailableExtensionSummary>> {
+    let installed_version_projection = if include_installed_version {
+        "installed_version"
+    } else {
+        "NULL::text AS installed_version"
+    };
+    let sql = format!(
+        r#"
+          SELECT name,
+                 default_version,
+                 {installed_version_projection},
+                 comment
+          FROM pg_available_extensions
+          ORDER BY name
+        "#
+    );
+    let rows = client.query(&sql, &[]).await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(AvailableExtensionSummary {
+                name: row.try_get("name")?,
+                default_version: row.try_get("default_version")?,
+                installed_version: row.try_get("installed_version")?,
+                comment: row.try_get("comment")?,
+            })
+        })
+        .collect()
+}
+
+async fn list_installed_extensions(
+    client: &Client,
+) -> anyhow::Result<Vec<InstalledExtensionSummary>> {
+    let rows = client
+        .query(
+            "SELECT extname AS name, extversion AS version FROM pg_extension ORDER BY extname",
+            &[],
+        )
+        .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(InstalledExtensionSummary {
+                name: row.try_get("name")?,
+                version: row.try_get("version")?,
+            })
+        })
+        .collect()
+}
+
 async fn install_extensions(
     database_url: &str,
     profile_name: &str,
@@ -6028,10 +6196,14 @@ async fn install_extensions(
     let result = async {
         for extension in extensions {
             ensure_extension_available(&client, profile_name, extension).await?;
-            client
+            if let Err(error) = client
                 .batch_execute(&create_extension_statement(extension)?)
                 .await
-                .with_context(|| extension_install_failure_message(profile_name, extension))?;
+            {
+                let context =
+                    extension_install_failure_message(profile_name, extension, &error.to_string());
+                return Err(error).context(context);
+            }
         }
         anyhow::Ok(())
     }
@@ -6064,10 +6236,28 @@ async fn ensure_extension_available(
     Ok(())
 }
 
-fn extension_install_failure_message(profile_name: &str, extension: &str) -> String {
+fn extension_install_failure_message(
+    profile_name: &str,
+    extension: &str,
+    postgres_error: &str,
+) -> String {
+    if extension_error_requires_server_setup(postgres_error) {
+        return format!(
+            "extension_setup_required: extension `{extension}` requires server-level setup on target Postgres profile `{profile_name}`. Configure the selected profile for this extension before requesting it, then retry."
+        );
+    }
+
     format!(
         "invalid_extensions: failed to install extension `{extension}` on target Postgres profile `{profile_name}`"
     )
+}
+
+fn extension_error_requires_server_setup(postgres_error: &str) -> bool {
+    let lower = postgres_error.to_ascii_lowercase();
+    lower.contains("shared_preload_libraries")
+        || lower.contains("must be preloaded")
+        || lower.contains("can only be loaded via")
+        || lower.contains("requires server-level setup")
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -8479,6 +8669,25 @@ mod tests {
     }
 
     #[test]
+    fn list_extensions_input_accepts_profile_and_sandbox_selectors() {
+        let input = serde_json::from_value::<ListExtensionsInput>(json!({
+            "profile": "local-pg18",
+            "postgresVersion": "18",
+            "databaseId": "db-id",
+            "databaseName": "pgsandbox_extensions_123"
+        }))
+        .unwrap();
+
+        assert_eq!(input.profile.as_deref(), Some("local-pg18"));
+        assert_eq!(input.postgres_version.as_deref(), Some("18"));
+        assert_eq!(input.database_id.as_deref(), Some("db-id"));
+        assert_eq!(
+            input.database_name.as_deref(),
+            Some("pgsandbox_extensions_123")
+        );
+    }
+
+    #[test]
     fn extension_requests_normalize_lowercase_and_deduplicate() {
         let extensions = normalize_extension_names(Some(vec![
             " PG_TRGM ".to_string(),
@@ -8517,11 +8726,24 @@ mod tests {
 
     #[test]
     fn extension_install_failure_message_preserves_validation_code() {
-        let message = extension_install_failure_message("local", "postgis");
+        let message = extension_install_failure_message("local", "postgis", "permission denied");
 
         assert!(message.contains("invalid_extensions"));
         assert!(message.contains("postgis"));
         assert!(message.contains("local"));
+    }
+
+    #[test]
+    fn extension_install_failure_message_classifies_server_setup_requirements() {
+        let message = extension_install_failure_message(
+            "local",
+            "pg_cron",
+            "pg_cron can only be loaded via shared_preload_libraries",
+        );
+
+        assert!(message.contains("extension_setup_required"));
+        assert!(message.contains("pg_cron"));
+        assert!(message.contains("server-level setup"));
     }
 
     #[test]

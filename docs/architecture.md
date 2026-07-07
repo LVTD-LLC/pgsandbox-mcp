@@ -70,6 +70,10 @@ The admin connection is used only for lifecycle operations. Tool calls that run 
 Requested extension installation also connects with the generated sandbox role
 after the database is created, so `CREATE EXTENSION` succeeds or fails under
 the same privileges the sandbox owner has.
+Extension discovery is read-only catalog inspection: profile-scoped discovery
+reports `pg_available_extensions` before creation, while sandbox-scoped
+discovery connects with the sandbox role and reports both available and
+installed extensions.
 Sandbox role passwords are encrypted before being persisted in the metadata table.
 Metadata setup encrypts older unencrypted local rows in place before strict
 password reads.
