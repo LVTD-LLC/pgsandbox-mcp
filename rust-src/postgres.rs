@@ -5914,11 +5914,7 @@ async fn install_extensions(
             client
                 .batch_execute(&create_extension_statement(extension)?)
                 .await
-                .with_context(|| {
-                    format!(
-                        "failed to install extension `{extension}` on target Postgres profile `{profile_name}`"
-                    )
-                })?;
+                .with_context(|| extension_install_failure_message(profile_name, extension))?;
         }
         anyhow::Ok(())
     }
@@ -5949,6 +5945,12 @@ async fn ensure_extension_available(
         );
     }
     Ok(())
+}
+
+fn extension_install_failure_message(profile_name: &str, extension: &str) -> String {
+    format!(
+        "invalid_extensions: failed to install extension `{extension}` on target Postgres profile `{profile_name}`"
+    )
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -8148,6 +8150,15 @@ mod tests {
         let sql = create_extension_statement("uuid-ossp").unwrap();
 
         assert_eq!(sql, "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"");
+    }
+
+    #[test]
+    fn extension_install_failure_message_preserves_validation_code() {
+        let message = extension_install_failure_message("local", "postgis");
+
+        assert!(message.contains("invalid_extensions"));
+        assert!(message.contains("postgis"));
+        assert!(message.contains("local"));
     }
 
     #[test]
