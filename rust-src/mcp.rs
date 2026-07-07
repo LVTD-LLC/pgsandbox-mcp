@@ -16,10 +16,10 @@ use crate::{
         CleanupExpiredInput, CloneDatabaseInput, ConnectionStringInput, CreateDatabaseInput,
         CreateSandboxFromTemplateInput, CreateSchemaSnapshotInput, CreateTemplateFromSandboxInput,
         DatabaseSelector, DeleteSchemaSnapshotInput, DeleteTemplateInput, DescribeSchemaInput,
-        DiffSchemaSnapshotInput, ExplainQueryInput, ListDatabasesInput, ListProfilesInput,
-        ListSchemaSnapshotsInput, ListTemplatesInput, PostgresSandboxManager, PrepareForRepoInput,
-        ResolvedTargetContext, RunRepoCommandInput, RunSqlInput, SchemaDiffInput,
-        SeedDatabaseInput, UnknownProfileError, ValidateSchemaChangeInput,
+        DiffSchemaSnapshotInput, ExplainQueryInput, ListDatabasesInput, ListExtensionsInput,
+        ListProfilesInput, ListSchemaSnapshotsInput, ListTemplatesInput, PostgresSandboxManager,
+        PrepareForRepoInput, ResolvedTargetContext, RunRepoCommandInput, RunSqlInput,
+        SchemaDiffInput, SeedDatabaseInput, UnknownProfileError, ValidateSchemaChangeInput,
     },
     telemetry::{properties, Telemetry, EVENT_MCP_SERVER_STARTED, EVENT_MCP_TOOL_COMPLETED},
 };
@@ -31,6 +31,7 @@ const SOURCE_DATABASE_URL_HINT: &str = "Check `sourceDatabaseUrl` credentials, s
 pub const PUBLIC_MCP_TOOLS: &[&str] = &[
     "list_profiles",
     "ensure_postgres",
+    "list_extensions",
     "create_database",
     "clone_database",
     "delete_database",
@@ -194,6 +195,32 @@ impl PgsandboxServer {
                 admin_url_redacted: mask_connection_string(&result.config.admin_url),
             })
         })
+        .await
+    }
+
+    #[tool(
+        description = "List Postgres extensions available on a profile, and installed extensions for an optional sandbox."
+    )]
+    async fn list_extensions(
+        &self,
+        Parameters(input): Parameters<ListExtensionsInput>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let event_properties = properties([
+            ("hasProfile", json!(input.profile.is_some())),
+            (
+                "hasPostgresVersion",
+                json!(input.postgres_version.is_some()),
+            ),
+            (
+                "hasDatabaseSelector",
+                json!(input.database_id.is_some() || input.database_name.is_some()),
+            ),
+        ]);
+        self.tracked_tool(
+            "list_extensions",
+            event_properties,
+            self.manager.list_extensions(input),
+        )
         .await
     }
 
@@ -963,6 +990,24 @@ impl ToolErrorResponse {
                 detail_handle: Some(json!({
                     "type": "tool-contract",
                     "field": "rowLimit"
+                })),
+            }
+        } else if lower.contains("extension_setup_required") {
+            ToolErrorBody {
+                code: "extension_setup_required",
+                category: "validation",
+                message: chain,
+                hint: "This extension needs server-level Postgres setup, such as package installation or shared_preload_libraries. Use list_extensions to inspect availability, then choose a profile where the extension is configured or follow a setup recipe before retrying.".to_string(),
+                sqlstate: None,
+                requested_version: None,
+                source_version: None,
+                target_version: None,
+                resolved_profile: None,
+                resolved_postgres_version: None,
+                detected_versions: Vec::new(),
+                detail_handle: Some(json!({
+                    "type": "tool-contract",
+                    "field": "extensions"
                 })),
             }
         } else if lower.contains("invalid_extensions") {
@@ -1783,6 +1828,11 @@ mod tests {
                 "invalid_extensions",
                 "validation",
             ),
+            (
+                "extension_setup_required: extension `pg_cron` requires server-level setup on target Postgres profile `local`",
+                "extension_setup_required",
+                "validation",
+            ),
         ];
 
         for (message, code, category) in cases {
@@ -1793,6 +1843,11 @@ mod tests {
             assert_eq!(first_error(&value)["code"], code);
             assert_eq!(first_error(&value)["category"], category);
         }
+    }
+
+    #[test]
+    fn list_extensions_is_a_public_mcp_tool() {
+        assert!(PUBLIC_MCP_TOOLS.contains(&"list_extensions"));
     }
 
     #[test]

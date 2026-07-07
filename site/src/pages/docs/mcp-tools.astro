@@ -1,6 +1,10 @@
 ---
 import DocsLayout from '../../layouts/DocsLayout.astro';
 const tools = [
+  ['list_profiles', 'Lists configured profiles and discoverable local Postgres versions so agents can choose a target profile or postgresVersion.'],
+  ['ensure_postgres', 'Installs missing local Postgres server binaries with a supported package manager when available, then starts a managed local profile.'],
+  ['doctor', 'Returns MCP-safe diagnostics and profile health without exposing secrets.'],
+  ['list_extensions', 'Lists available extensions for a profile and installed extension versions for an existing sandbox. Use this before create or clone when an app depends on Postgres extensions.'],
   ['create_database', 'Creates an isolated database and login role, optionally installing requested extensions available on the target profile. Returns the database id, database name, role name, expiry, installed extensions, and redacted connection string.'],
   ['clone_database', 'Creates a sandbox, optionally installs requested extensions, and restores an existing Postgres source into it with pg_dump and pg_restore. The restore runs as the sandbox role and cleans up the destination if cloning fails.'],
   ['delete_database', 'Deletes a database and role created by this MCP. Destructive operations are scoped to tracked sandbox resources.'],

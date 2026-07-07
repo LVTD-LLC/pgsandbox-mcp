@@ -2,7 +2,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use pgsandbox_mcp::{
     config::load_config,
-    postgres::{CreateDatabaseInput, DatabaseSelector, PostgresSandboxManager, RunSqlInput},
+    postgres::{
+        CreateDatabaseInput, DatabaseSelector, ListExtensionsInput, PostgresSandboxManager,
+        RunSqlInput,
+    },
 };
 use serde_json::{json, Value};
 
@@ -18,6 +21,23 @@ async fn create_database_installs_requested_extensions_when_enabled() {
     let expected_extension = extension.trim().to_ascii_lowercase();
     let manager = PostgresSandboxManager::new(load_config().expect("load PGSandbox config"));
     let owner = format!("pgsandbox-extension-{}", unique_suffix());
+    let profile_extensions = manager
+        .list_extensions(ListExtensionsInput {
+            profile: None,
+            postgres_version: None,
+            database_id: None,
+            database_name: None,
+        })
+        .await
+        .expect("list available extensions");
+    if !profile_extensions
+        .available_extensions
+        .iter()
+        .any(|available| available.name == expected_extension)
+    {
+        panic!("expected available extension {expected_extension} in selected profile");
+    }
+
     let created = manager
         .create_database(CreateDatabaseInput {
             profile: None,
@@ -40,6 +60,25 @@ async fn create_database_installs_requested_extensions_when_enabled() {
                 created.installed_extensions
             );
         }
+        let sandbox_extensions = manager
+            .list_extensions(ListExtensionsInput {
+                profile: Some(created.profile.clone()),
+                postgres_version: None,
+                database_id: Some(created.database_id.clone()),
+                database_name: None,
+            })
+            .await?;
+        if !sandbox_extensions
+            .installed_extensions
+            .iter()
+            .any(|installed| installed.name == expected_extension)
+        {
+            anyhow::bail!(
+                "expected installed extension {expected_extension} in {:?}",
+                sandbox_extensions.installed_extensions
+            );
+        }
+
         let lookup = manager
             .run_sql(RunSqlInput {
                 profile: Some(created.profile.clone()),
