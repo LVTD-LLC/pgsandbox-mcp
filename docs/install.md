@@ -159,7 +159,7 @@ installer release:
 pgsandbox-mcp upgrade --setup codex
 pgsandbox-mcp upgrade --no-setup
 pgsandbox-mcp upgrade --no-doctor
-pgsandbox-mcp upgrade --version 0.4.5
+pgsandbox-mcp upgrade --version 0.4.6
 ```
 
 Homebrew can only upgrade after a newer GitHub release exists and the

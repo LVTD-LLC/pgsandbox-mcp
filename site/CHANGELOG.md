@@ -2,6 +2,7 @@
 
 ## 2026-07-07
 
+- Released `pgsandbox-mcp` v0.4.6 with the upgrade command, sandbox extension workflows, resolved target version fields, managed-local auto-install helpers, clone/restore compatibility fixes, extension discovery, and Docker connection variants.
 - Released `pgsandbox-mcp` v0.4.5 with local Postgres discovery expanded through major version 13 and the new EXPLAIN plan agent SQL review guide.
 - Added the Astro Markdown blog post "How to Use Postgres EXPLAIN Plans for Agent SQL Review" with SEO ledger, link inventory, and inbound blog links.
 
