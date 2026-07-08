@@ -408,6 +408,7 @@ async fn exercise_clone(
             source_database_url: connection_string.to_string(),
             name_hint: Some("dogfood clone".to_string()),
             ttl_minutes: Some(45),
+            timeout_seconds: None,
             owner: Some(owner.to_string()),
             labels: Some([("suite".to_string(), json!("dogfood"))].into()),
             schema_only: Some(true),

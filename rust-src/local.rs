@@ -1476,14 +1476,18 @@ impl LocalPostgresInstallCommand {
     }
 
     fn run(&self) -> anyhow::Result<()> {
-        let status = Command::new(&self.program)
+        let output = Command::new(&self.program)
             .args(&self.args)
             .envs(self.env.iter().map(|(key, value)| (key, value)))
             .stdin(Stdio::null())
-            .status()
+            .output()
             .with_context(|| format!("failed to run `{}`", self.display()))?;
-        if !status.success() {
-            anyhow::bail!("`{}` failed with {status}", self.display());
+        if !output.status.success() {
+            failed_command(
+                &self.display(),
+                output.status,
+                command_failure_output(&output),
+            )?;
         }
         Ok(())
     }
@@ -1536,10 +1540,17 @@ fn failed_command(binary: &str, status: ExitStatus, stderr: &[u8]) -> anyhow::Re
 fn summarize_stderr(stderr: &[u8]) -> String {
     let message = String::from_utf8_lossy(stderr).trim().to_string();
     if message.is_empty() {
-        "(no stderr)".to_string()
-    } else {
-        message
+        return "(no stderr)".to_string();
     }
+    const MAX_ERROR_LEN: usize = 4_000;
+    if message.len() <= MAX_ERROR_LEN {
+        return message;
+    }
+    let mut end = MAX_ERROR_LEN;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &message[..end])
 }
 
 fn write_password_file(path: &Path, password: &str) -> anyhow::Result<()> {
@@ -1770,6 +1781,32 @@ mod tests {
         );
 
         assert!(local_postgres_error_is_missing_binaries(&error));
+    }
+
+    #[test]
+    fn command_failure_output_summary_is_bounded() {
+        let output = vec![b'x'; 5_000];
+        let summary = summarize_stderr(&output);
+
+        assert_eq!(summary.len(), 4_003);
+        assert!(summary.ends_with("..."));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_command_failure_includes_captured_output() {
+        let command = LocalPostgresInstallCommand::new(
+            "sh",
+            [
+                "-c".to_string(),
+                "printf 'formula unavailable for postgresql@13\\n' >&2; exit 1".to_string(),
+            ],
+        );
+
+        let error = command.run().unwrap_err().to_string();
+
+        assert!(error.contains("formula unavailable for postgresql@13"));
+        assert!(error.contains("sh -c"));
     }
 
     #[test]

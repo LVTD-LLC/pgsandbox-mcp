@@ -828,18 +828,22 @@ or a production-data import workflow.
 
 `clone_database` uses a portable dump/restore path:
 
-1. Preflight source and target Postgres major versions.
+1. Preflight source and target Postgres major versions, and capture a
+   best-effort source size estimate.
 2. Create an empty tracked target sandbox.
 3. Install any requested target extensions using the sandbox role.
 4. Run `pg_dump` against the source database.
 5. Skip source extension archive entries from `pg_stat_statements` and any
    requested `excludeSourceExtensions`.
 6. Run `pg_restore` into the target sandbox using the sandbox role.
-7. Delete the target sandbox if restore fails.
+7. Delete the target sandbox if restore fails or times out.
 
 Newer-to-older clone paths fail before target creation with
-`restore_incompatible`. Cloning and template tools require `pg_dump` and
-`pg_restore`; ordinary create/query/delete flows do not.
+`restore_incompatible`. The dump/restore phase defaults to a 240 second
+timeout so PGSandbox can return `command_timeout` with the created sandbox id,
+source size estimate when available, and cleanup status before common MCP
+clients exhaust their own call budget. Cloning and template tools require
+`pg_dump` and `pg_restore`; ordinary create/query/delete flows do not.
 
 ### Telemetry
 
@@ -1583,7 +1587,10 @@ From MCP, agents can call `ensure_postgres` before creating a sandbox:
 Automatic PostgreSQL package installs use Homebrew on macOS; `apt-get`, `dnf`,
 `yum`, `zypper`, or `pacman` on Linux; and WinGet or Chocolatey on Windows.
 Versioned packages still depend on what that package manager currently
-publishes.
+publishes. If an automatic install fails, the MCP error includes bounded
+installer output and the next action: install manually and set the matching
+`PGSANDBOX_POSTGRES_<MAJOR>_BIN_DIR`, or choose a newer clone target when a
+matching older target is unavailable.
 
 If your package manager does not provide that major version, point PGSandbox at
 existing server binaries:
@@ -1667,6 +1674,12 @@ pg_restore --version
 
 Also check source and target Postgres major versions. Newer-to-older clone
 paths are rejected before creating the target sandbox.
+
+Large clone operations time out inside PGSandbox before common MCP client call
+budgets expire. The structured timeout includes the created sandbox id/name,
+best-effort source size estimate, and whether cleanup already deleted the
+sandbox. Retry with a larger `timeoutSeconds`, `schemaOnly: true`, or a smaller
+source/template path.
 
 If clone restore fails on a source-only extension such as an observability
 extension, retry with `excludeSourceExtensions`. `pg_stat_statements` is skipped
