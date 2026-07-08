@@ -8,6 +8,7 @@
     "check": "cargo check",
     "package:homebrew": "cargo build --release && sh scripts/package-homebrew.sh",
     "package:release": "cargo build --release && sh scripts/package-release.sh",
+    "uninstall:pgsandbox": "sh scripts/uninstall.sh",
     "test": "cargo test",
     "typecheck": "cargo check",
     "start": "cargo run --",

@@ -36,6 +36,8 @@ use crate::{
     VERSION,
 };
 
+const UNINSTALL_SCRIPT: &str = include_str!("../scripts/uninstall.sh");
+
 pub async fn run(args: Vec<String>) -> anyhow::Result<u8> {
     let (command, rest) = args
         .split_first()
@@ -72,6 +74,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<u8> {
             print_help();
             Ok(0)
         }
+        "uninstall" if has_help_flag(&rest) => uninstall(&rest).await,
         "local" if has_help_flag(&rest) => {
             print_help();
             Ok(0)
@@ -89,6 +92,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<u8> {
         "ensure-postgres" if uses_tool_json_mode(&rest) => cli_tool(command, &rest).await,
         "ensure-postgres" => ensure_postgres(&rest).await,
         "upgrade" => upgrade(&rest).await,
+        "uninstall" => uninstall(&rest).await,
         "local" => local(&rest).await,
         "smoke-test" => smoke_test(&rest).await,
         "" => start_server().await.map(|()| 0),
@@ -1095,6 +1099,33 @@ async fn upgrade(args: &[String]) -> anyhow::Result<u8> {
     Ok(0)
 }
 
+async fn uninstall(args: &[String]) -> anyhow::Result<u8> {
+    let script_path = temp_uninstall_script_path();
+    fs::write(&script_path, UNINSTALL_SCRIPT).with_context(|| {
+        format!(
+            "failed to write uninstall helper to {}",
+            script_path.display()
+        )
+    })?;
+
+    let current_exe = env::current_exe().context("failed to resolve current executable")?;
+    let status = Command::new("sh")
+        .arg(&script_path)
+        .args(args)
+        .env("PGSANDBOX_CURRENT_EXE", &current_exe)
+        .env("PGSANDBOX_UNINSTALL_COMMAND_NAME", "pgsandbox uninstall")
+        .status()
+        .with_context(|| format!("failed to run uninstall helper {}", script_path.display()));
+    let _ = fs::remove_file(&script_path);
+    let status = status?;
+
+    if !status.success() {
+        anyhow::bail!("uninstall helper failed with {status}");
+    }
+
+    Ok(0)
+}
+
 async fn local(args: &[String]) -> anyhow::Result<u8> {
     let command = parse_local_command(args)?;
     let cluster = LocalPostgresCluster::from_env_for_version(command.postgres_version.as_deref())?;
@@ -1733,6 +1764,17 @@ fn temp_upgrade_script_path() -> PathBuf {
     ))
 }
 
+fn temp_uninstall_script_path() -> PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    env::temp_dir().join(format!(
+        "pgsandbox-uninstall-{}-{timestamp}.sh",
+        std::process::id()
+    ))
+}
+
 fn apply_installer_env_overrides(command: &mut Command, options: &BTreeMap<String, String>) {
     for (option, env_name) in [
         ("version", "PGSANDBOX_VERSION"),
@@ -1996,6 +2038,7 @@ Usage:
   pgsandbox local status [options]   Show managed local Postgres status
   pgsandbox smoke-test [options]     Create, query, and delete a sandbox
   pgsandbox upgrade [options]        Upgrade the binary, then run setup all and doctor
+  pgsandbox uninstall [options]      Remove PGSandbox binaries, MCP config entries, and local state
 
 Sandbox CLI tool commands:
   pgsandbox create-database --name-hint <text> --ttl-minutes <minutes>
@@ -2047,6 +2090,14 @@ Upgrade options:
   --no-setup                         Skip post-upgrade setup
   --no-doctor                        Skip post-upgrade doctor
   --dry-run                          Print upgrade actions without running them
+
+Uninstall options:
+  --yes                              Do not prompt before deleting files or uninstalling packages
+  --dry-run                          Print uninstall actions without changing files
+  --server-name <name>               MCP server entry to remove from client configs
+  --keep-binaries                    Do not uninstall packages or remove binaries
+  --keep-client-config               Do not remove MCP client config entries
+  --keep-state                       Do not remove ~/.pgsandbox or socket state
 "#
     )
 }
@@ -2166,6 +2217,14 @@ mod tests {
         assert!(help.contains("pgsandbox upgrade [options]"));
         assert!(help.contains("--setup <client>"));
         assert!(help.contains("--no-setup"));
+    }
+
+    #[test]
+    fn help_text_lists_uninstall_command() {
+        let help = help_text();
+
+        assert!(help.contains("pgsandbox uninstall [options]"));
+        assert!(help.contains("--keep-client-config"));
     }
 
     #[test]

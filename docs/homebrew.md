@@ -92,5 +92,8 @@ pgsandbox setup --client vscode --scope project
 pgsandbox setup --client claude-desktop
 ```
 
+Use `pgsandbox uninstall --dry-run` to preview a full local uninstall/reset
+before removing binaries, MCP config entries, and managed local state.
+
 Use `--admin-url "$PGSANDBOX_ADMIN_DATABASE_URL"` only when intentionally
 configuring an external Postgres profile instead of the managed local default.
