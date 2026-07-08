@@ -2,6 +2,7 @@
 
 ## 2026-07-08
 
+- Released `pgsandbox-mcp` v0.4.7 with actionable local Postgres install diagnostics, consistent managed-local profile resolution, restore compatibility classification for filtered clone archives, and structured clone timeout cleanup details.
 - Added the Astro Markdown blog post "How to Run Agent SQL with Bounded Postgres Results" with SEO ledger, link inventory, and inbound blog links.
 
 ## 2026-07-07
