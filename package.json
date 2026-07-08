@@ -1,7 +1,7 @@
 {
-  "name": "pgsandbox-mcp",
+  "name": "pgsandbox",
   "version": "0.4.7",
-  "description": "MCP server for disposable Postgres sandboxes.",
+  "description": "CLI and MCP server for disposable Postgres sandboxes.",
   "private": true,
   "scripts": {
     "build": "cargo build --release",
@@ -25,7 +25,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/LVTD-LLC/pgsandbox-mcp.git"
+    "url": "git+https://github.com/LVTD-LLC/pgsandbox.git"
   },
   "license": "MIT"
 }

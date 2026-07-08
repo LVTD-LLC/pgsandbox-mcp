@@ -1,4 +1,4 @@
-# PGSandbox MCP Technical Steering
+# PGSandbox Technical Steering
 
 ## Stack
 
@@ -22,9 +22,9 @@ Other useful commands:
 
 ```bash
 npm run package:homebrew
-pgsandbox-mcp local status
-pgsandbox-mcp doctor
-pgsandbox-mcp smoke-test
+pgsandbox local status
+pgsandbox doctor
+pgsandbox smoke-test
 ```
 
 ## Runtime Configuration
@@ -101,7 +101,7 @@ JSON config files may also set `"telemetry": { "enabled": false }`.
 
 ## Client Config Rules
 
-`pgsandbox-mcp setup` writes client config for:
+`pgsandbox setup` writes client config for:
 
 - Codex: TOML under `mcp_servers`.
 - Cursor and Claude Desktop: JSON under `mcpServers`.

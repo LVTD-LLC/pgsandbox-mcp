@@ -21,11 +21,11 @@ else
   target="$host_target"
 fi
 target_dir="${CARGO_TARGET_DIR:-target}"
-binary="$target_dir/$target/release/pgsandbox-mcp"
+binary="$target_dir/$target/release/pgsandbox"
 
 if [ ! -f "$binary" ]; then
-  if [ "$explicit_target" = "false" ] && [ "$target" = "$host_target" ] && [ -f "$target_dir/release/pgsandbox-mcp" ]; then
-    binary="$target_dir/release/pgsandbox-mcp"
+  if [ "$explicit_target" = "false" ] && [ "$target" = "$host_target" ] && [ -f "$target_dir/release/pgsandbox" ]; then
+    binary="$target_dir/release/pgsandbox"
   else
     die "release binary not found for target $target. Run cargo build --release --target $target first."
   fi
@@ -33,17 +33,17 @@ fi
 
 [ -f "$binary" ] || die "release binary not found. Run cargo build --release first."
 
-archive_name="pgsandbox-mcp-${version}-${target}.tar.gz"
+archive_name="pgsandbox-${version}-${target}.tar.gz"
 archive="dist/${archive_name}"
-checksums="dist/pgsandbox-mcp-${version}-checksums.txt"
-checksums_tmp="dist/.pgsandbox-mcp-${version}-checksums.$$"
+checksums="dist/pgsandbox-${version}-checksums.txt"
+checksums_tmp="dist/.pgsandbox-${version}-checksums.$$"
 staging="$(mktemp -d 2>/dev/null || mktemp -d -t pgsandbox-release)"
 trap 'rm -rf "$staging" "$checksums_tmp"' EXIT INT HUP TERM
 
 mkdir -p dist
-cp "$binary" "$staging/pgsandbox-mcp"
-chmod 0755 "$staging/pgsandbox-mcp"
-tar -czf "$archive" -C "$staging" pgsandbox-mcp
+cp "$binary" "$staging/pgsandbox"
+chmod 0755 "$staging/pgsandbox"
+tar -czf "$archive" -C "$staging" pgsandbox
 
 if command -v shasum >/dev/null 2>&1; then
   sha_output=$(shasum -a 256 "$archive") || die "failed to hash $archive with shasum"

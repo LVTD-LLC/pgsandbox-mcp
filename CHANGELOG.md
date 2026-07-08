@@ -2,31 +2,31 @@
 
 ## 2026-07-08
 
-- Released `pgsandbox-mcp` v0.4.7 with actionable local Postgres install diagnostics, consistent managed-local profile resolution, restore compatibility classification for filtered clone archives, and structured clone timeout cleanup details.
+- Released `pgsandbox` v0.4.7 with actionable local Postgres install diagnostics, consistent managed-local profile resolution, restore compatibility classification for filtered clone archives, and structured clone timeout cleanup details.
 - Added the Astro Markdown blog post "How to Run Agent SQL with Bounded Postgres Results" with SEO ledger, link inventory, and inbound blog links.
 
 ## 2026-07-07
 
-- Released `pgsandbox-mcp` v0.4.6 with the upgrade command, sandbox extension workflows, resolved target version fields, managed-local auto-install helpers, clone/restore compatibility fixes, extension discovery, and Docker connection variants.
-- Released `pgsandbox-mcp` v0.4.5 with local Postgres discovery expanded through major version 13 and the new EXPLAIN plan agent SQL review guide.
+- Released `pgsandbox` v0.4.6 with the upgrade command, sandbox extension workflows, resolved target version fields, managed-local auto-install helpers, clone/restore compatibility fixes, extension discovery, and Docker connection variants.
+- Released `pgsandbox` v0.4.5 with local Postgres discovery expanded through major version 13 and the new EXPLAIN plan agent SQL review guide.
 - Added the Astro Markdown blog post "How to Use Postgres EXPLAIN Plans for Agent SQL Review" with SEO ledger, link inventory, and inbound blog links.
 
 ## 2026-07-06
 
-- Released `pgsandbox-mcp` v0.4.4 with simplified managed-local onboarding, scoped expired cleanup filters, typed multi-statement `run_sql` result sets, stricter readonly and row-limit validation, classified `explain_query` statement errors, clone-source repair hints, and clearer agent workflow docs.
-- Released `pgsandbox-mcp` v0.4.3 with normalized MCP response envelopes, structured unknown-profile errors, encrypted sandbox role password migration, split schema relation descriptions, tighter repo command timeout hints, compact doctor version diagnostics, and updated ReviewGate setup guidance.
+- Released `pgsandbox` v0.4.4 with simplified managed-local onboarding, scoped expired cleanup filters, typed multi-statement `run_sql` result sets, stricter readonly and row-limit validation, classified `explain_query` statement errors, clone-source repair hints, and clearer agent workflow docs.
+- Released `pgsandbox` v0.4.3 with normalized MCP response envelopes, structured unknown-profile errors, encrypted sandbox role password migration, split schema relation descriptions, tighter repo command timeout hints, compact doctor version diagnostics, and updated ReviewGate setup guidance.
 - Added the Astro Markdown blog post "How to Use Postgres Schema Snapshots for Agent Migration Reviews" with SEO ledger, link inventory, and inbound blog links.
 
 ## 2026-07-05
 
-- Released `pgsandbox-mcp` v0.4.2 with safer connection-string redaction, schema command timeout hardening, repo command validation polish, normalized `run_sql` int8 serialization, unsupported-type nullability handling, invalid TTL rejection, and simpler schema introspection payloads.
-- Released `pgsandbox-mcp` v0.4.1 with the latest site content updates and Homebrew packaging metadata.
+- Released `pgsandbox` v0.4.2 with safer connection-string redaction, schema command timeout hardening, repo command validation polish, normalized `run_sql` int8 serialization, unsupported-type nullability handling, invalid TTL rejection, and simpler schema introspection payloads.
+- Released `pgsandbox` v0.4.1 with the latest site content updates and Homebrew packaging metadata.
 - Added the Astro Markdown blog post "Database Migration Testing Before Agent PRs" with SEO ledger, link inventory, and inbound blog links.
 - Added the Astro Markdown blog post "Postgres Template Databases vs Task Sandboxes" with SEO ledger, link inventory, and inbound blog links.
 
 ## 2026-07-03
 
-- Released `pgsandbox-mcp` v0.4.0 with generic agent-first repo workflow tools, bounded schema validation and snapshot timeouts, MCP `doctor`, SQLSTATE-aware errors, safer connection-string redaction, richer `run_sql` metadata, cross-profile database-name lookup, and opt-in dogfood reliability coverage.
+- Released `pgsandbox` v0.4.0 with generic agent-first repo workflow tools, bounded schema validation and snapshot timeouts, MCP `doctor`, SQLSTATE-aware errors, safer connection-string redaction, richer `run_sql` metadata, cross-profile database-name lookup, and opt-in dogfood reliability coverage.
 - Added the Astro Markdown blog post "Testcontainers vs Disposable Postgres Sandboxes for Agent Work" with SEO ledger, link inventory, and inbound blog links.
 
 ## 2026-07-02
@@ -35,9 +35,9 @@
 
 ## 2026-07-01
 
-- Released `pgsandbox-mcp` v0.3.0 with agent-safe cross-profile databaseId lookup, all-version list/cleanup modes, clone downgrade preflight, structured version diagnostics, and regression coverage for the agent-facing version contract.
-- Released `pgsandbox-mcp` v0.2.1 with managed-local diagnostics, deferred MCP startup, short Unix socket paths, structured tool errors, and updated agent-facing docs.
-- Released `pgsandbox-mcp` v0.2.0 with managed local multi-version Postgres support.
+- Released `pgsandbox` v0.3.0 with agent-safe cross-profile databaseId lookup, all-version list/cleanup modes, clone downgrade preflight, structured version diagnostics, and regression coverage for the agent-facing version contract.
+- Released `pgsandbox` v0.2.1 with managed-local diagnostics, deferred MCP startup, short Unix socket paths, structured tool errors, and updated agent-facing docs.
+- Released `pgsandbox` v0.2.0 with managed local multi-version Postgres support.
 - Added the Astro Markdown blog post "What Is a Database Sandbox?" with SEO ledger, link inventory, and inbound blog links.
 - Updated existing blog posts to link to the new database sandbox definition page.
 - Added managed local multi-version Postgres runtime support with `--postgres-version`, `PGSANDBOX_POSTGRES_VERSION`, versioned `local-pg<major>` profiles, isolated data directories, and version-specific binary discovery.
@@ -59,7 +59,7 @@
 - Added a site content check that requires explicit blog post publication status.
 - Moved the two published site blog posts out of Rowset and into Astro-managed Markdown content files.
 - Added the database branching comparison brief and SEO ledger updates for the Rowset-backed blog.
-- Added the initial SEO content foundation with brand guidance, Rowset blog configuration, internal link inventory, keyword research baseline, and candidate backlog for future PGSandbox MCP blog posts.
+- Added the initial SEO content foundation with brand guidance, Rowset blog configuration, internal link inventory, keyword research baseline, and candidate backlog for future PGSandbox blog posts.
 - Updated the site deployment path so Rowset-backed blog pages are built in GitHub Actions before CapRover serves the static output.
 
 ## 2026-06-19
@@ -80,9 +80,9 @@
 - Added release automation to open Homebrew tap update PRs with versioned release asset URLs and SHA256 checksums.
 - Added a GitHub release installer script for downloading and installing platform-specific binaries.
 - Rewrote the MCP server as a Rust native binary with local Postgres profile support.
-- Added agent-assisted setup prompt guidance for installing, configuring, and verifying PGSandbox MCP.
+- Added agent-assisted setup prompt guidance for installing, configuring, and verifying PGSandbox.
 - Added a static Astro marketing/docs site under `site/` with a futuristic landing page, getting-started docs, Docker/CapRover packaging, and a GitHub Actions deployment workflow for main-branch updates.
-- Renamed the product direction to PGSandbox MCP and removed the default "experiment" framing from user-facing docs.
+- Renamed the product direction to PGSandbox and removed the default "experiment" framing from user-facing docs.
 - Added AI steering files for product, technical, structure, vision, and design guidance.
 
 ## 2026-05-28

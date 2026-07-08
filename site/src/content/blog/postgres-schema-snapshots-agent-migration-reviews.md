@@ -9,7 +9,7 @@ tags: ["Postgres", "schema diff", "database migrations", "AI agents", "MCP"]
 category: "Engineering"
 metaTitle: "Postgres Schema Snapshots for Agent Reviews"
 metaDescription: "Use Postgres schema snapshots and diffs to review agent migrations with before/after evidence, bounded output, scoped roles, and cleanup."
-canonicalUrl: "https://pgsandbox-mcp.lvtd.dev/blog/postgres-schema-snapshots-agent-migration-reviews/"
+canonicalUrl: "https://pgsandbox.lvtd.dev/blog/postgres-schema-snapshots-agent-migration-reviews/"
 heroImageUrl: ""
 featured: false
 sortOrder: 100
@@ -30,7 +30,7 @@ The shortest safe loop is:
 
 The information-gain point is the review contract. A schema diff is not enough by itself. For agent work, a review-grade schema snapshot ties the diff to a specific sandbox id, scoped role, command array, object counts, bounded output, and cleanup path. That is what lets a human reviewer distinguish "the agent says it ran the migration" from "the agent produced database evidence worth reviewing."
 
-PGSandbox MCP exposes that contract directly. The [MCP tool contract](https://pgsandbox-mcp.lvtd.dev/docs/mcp-tools/) includes `create_schema_snapshot`, `list_schema_snapshots`, `diff_schema_snapshot`, `schema_digest`, `schema_diff`, and `validate_schema_change`. The [architecture notes](https://pgsandbox-mcp.lvtd.dev/docs/architecture/) describe the resource model behind those tools: one sandbox database, one scoped role, TTL metadata, and cleanup tied to tracked resources.
+PGSandbox exposes that contract directly. The [MCP tool contract](https://pgsandbox.lvtd.dev/docs/mcp-tools/) includes `create_schema_snapshot`, `list_schema_snapshots`, `diff_schema_snapshot`, `schema_digest`, `schema_diff`, and `validate_schema_change`. The [architecture notes](https://pgsandbox.lvtd.dev/docs/architecture/) describe the resource model behind those tools: one sandbox database, one scoped role, TTL metadata, and cleanup tied to tracked resources.
 
 ## What is a Postgres schema snapshot?
 
@@ -40,7 +40,7 @@ PostgreSQL gives you several places to inspect schema state. Its information sch
 
 That is useful, but it is not the whole story for Postgres review. PostgreSQL-specific features often need system catalogs or Postgres-specific views. A review artifact should normalize the important parts rather than ask a reviewer to inspect raw catalog queries.
 
-In PGSandbox MCP, a schema snapshot is a named local checkpoint for a PGSandbox-owned sandbox. It stores a compact schema digest and metadata under the local PGSandbox state directory. It is explicit by design: create a new snapshot when you want a review baseline, diff it when the migration has run, and delete it when it no longer has a job.
+In PGSandbox, a schema snapshot is a named local checkpoint for a PGSandbox-owned sandbox. It stores a compact schema digest and metadata under the local PGSandbox state directory. It is explicit by design: create a new snapshot when you want a review baseline, diff it when the migration has run, and delete it when it no longer has a job.
 
 ## When should an agent use schema snapshots?
 
@@ -57,7 +57,7 @@ Good fits include:
 
 Do not use snapshots as a way to avoid data checks. A schema snapshot can show that a `NOT NULL` constraint appeared. It cannot prove existing rows satisfy the constraint unless the agent also seeds or checks the relevant data cases.
 
-That is why this topic sits next to the broader [database migration testing workflow](https://pgsandbox-mcp.lvtd.dev/blog/database-migration-testing-agent-pr/). Migration testing proves the command, schema change, data edge cases, and cleanup. Schema snapshots make the schema-change part precise enough to review.
+That is why this topic sits next to the broader [database migration testing workflow](https://pgsandbox.lvtd.dev/blog/database-migration-testing-agent-pr/). Migration testing proves the command, schema change, data edge cases, and cleanup. Schema snapshots make the schema-change part precise enough to review.
 
 ## Schema snapshot vs schema diff vs migration lint
 
@@ -72,11 +72,11 @@ The terms overlap, but they answer different questions.
 
 External tools reinforce the same pattern. Atlas describes `atlas migrate lint` as analyzing migration files for dangerous or breaking changes, including destructive operations, application-breaking schema changes, table locks, and rewrites (https://atlasgo.io/versioned/lint). Atlas also has `schema diff` workflows for comparing PostgreSQL schemas (https://atlasgo.io/declarative/diff). Stripe's `pg-schema-diff` describes itself as computing differences between Postgres database schemas and generating SQL to move from one schema to another, while warning that not all migrations can avoid locks or downtime (https://github.com/stripe/pg-schema-diff).
 
-Those are strong schema-management tools. PGSandbox MCP has a narrower job: give the coding agent a disposable Postgres target and a bounded evidence path. It does not replace your migration framework or your schema management tool. It gives the agent a safe place to run the framework and a compact way to show what changed.
+Those are strong schema-management tools. PGSandbox has a narrower job: give the coding agent a disposable Postgres target and a bounded evidence path. It does not replace your migration framework or your schema management tool. It gives the agent a safe place to run the framework and a compact way to show what changed.
 
 ## Step 1: create the sandbox that owns the proof
 
-Start with a [database sandbox](https://pgsandbox-mcp.lvtd.dev/blog/what-is-database-sandbox/) rather than the shared development database.
+Start with a [database sandbox](https://pgsandbox.lvtd.dev/blog/what-is-database-sandbox/) rather than the shared development database.
 
 The sandbox should have:
 
@@ -86,7 +86,7 @@ The sandbox should have:
 4. A scoped role for task SQL.
 5. No production connection string in chat, logs, PR notes, or tracked files.
 
-With PGSandbox MCP, `create_database` creates an isolated database and login role. If the migration needs an existing shape, use a schema-only `clone_database` from an approved source or restore a local template into a fresh sandbox. The [Postgres clone database sandbox guide](https://pgsandbox-mcp.lvtd.dev/blog/how-to-clone-postgres-database-sandbox/) explains the clone boundary and why schema-only is often the safer default.
+With PGSandbox, `create_database` creates an isolated database and login role. If the migration needs an existing shape, use a schema-only `clone_database` from an approved source or restore a local template into a fresh sandbox. The [Postgres clone database sandbox guide](https://pgsandbox.lvtd.dev/blog/how-to-clone-postgres-database-sandbox/) explains the clone boundary and why schema-only is often the safer default.
 
 The important rule is authority separation. The tool may need lifecycle authority to create the database. The migration command should run against the sandbox connection, not against a general admin URL.
 
@@ -103,7 +103,7 @@ before_pr_1842
 before_payment_status_constraint
 ```
 
-The name matters because agents lose context. A named checkpoint is easier to inspect than "the schema from earlier." The [MCP tool docs](https://pgsandbox-mcp.lvtd.dev/docs/mcp-tools/) show the same pattern: create a schema snapshot before the change, then diff that snapshot after the migration command runs.
+The name matters because agents lose context. A named checkpoint is easier to inspect than "the schema from earlier." The [MCP tool docs](https://pgsandbox.lvtd.dev/docs/mcp-tools/) show the same pattern: create a schema snapshot before the change, then diff that snapshot after the migration command runs.
 
 A good snapshot response should give the reviewer enough shape without dumping raw catalog output:
 
@@ -213,7 +213,7 @@ where payment_status is null;
 
 PGSandbox's `run_sql` returns bounded rows and supports row limits. That is the right shape for PR evidence. The reviewer needs counts, representative failures, and SQLSTATE details, not sensitive rows or a huge transcript.
 
-If a schema change is meant to alter a query path, add a [Postgres EXPLAIN plan review](https://pgsandbox-mcp.lvtd.dev/blog/postgres-explain-plan-agent-sql/) beside the bounded row checks. The plan shows whether Postgres expects to touch the intended relations before the agent treats execution output as proof.
+If a schema change is meant to alter a query path, add a [Postgres EXPLAIN plan review](https://pgsandbox.lvtd.dev/blog/postgres-explain-plan-agent-sql/) beside the bounded row checks. The plan shows whether Postgres expects to touch the intended relations before the agent treats execution output as proof.
 
 If the task needs realistic source shape, start with schema-only, synthetic, masked, or reduced data. A disposable sandbox limits where writes land. It does not make sensitive data safe to expose.
 
@@ -266,9 +266,9 @@ No. Use snapshots for database-structure changes. A UI-only or docs-only PR does
 
 An empty diff can be useful if the task was supposed to be data-only or idempotent. If the PR claims to change schema and the diff is empty, the agent probably ran the wrong command, targeted the wrong database, or produced a migration that did not apply.
 
-### Does PGSandbox MCP replace migration lint tools?
+### Does PGSandbox replace migration lint tools?
 
-No. Use migration lint tools when they fit your stack. PGSandbox MCP gives agents a disposable database, scoped role, snapshot/diff workflow, bounded SQL output, and cleanup path so the lint result can be paired with real Postgres evidence.
+No. Use migration lint tools when they fit your stack. PGSandbox gives agents a disposable database, scoped role, snapshot/diff workflow, bounded SQL output, and cleanup path so the lint result can be paired with real Postgres evidence.
 
 <script type="application/ld+json">
 {
@@ -309,10 +309,10 @@ No. Use migration lint tools when they fit your stack. PGSandbox MCP gives agent
     },
     {
       "@type": "Question",
-      "name": "Does PGSandbox MCP replace migration lint tools?",
+      "name": "Does PGSandbox replace migration lint tools?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "No. Use migration lint tools when they fit your stack. PGSandbox MCP gives agents a disposable database, scoped role, snapshot/diff workflow, bounded SQL output, and cleanup path so the lint result can be paired with real Postgres evidence."
+        "text": "No. Use migration lint tools when they fit your stack. PGSandbox gives agents a disposable database, scoped role, snapshot/diff workflow, bounded SQL output, and cleanup path so the lint result can be paired with real Postgres evidence."
       }
     }
   ]

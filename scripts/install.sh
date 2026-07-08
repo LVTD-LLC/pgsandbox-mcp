@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 
-REPO="${PGSANDBOX_REPO:-LVTD-LLC/pgsandbox-mcp}"
+REPO="${PGSANDBOX_REPO:-LVTD-LLC/pgsandbox}"
 GITHUB_BASE_URL="${PGSANDBOX_GITHUB_BASE_URL:-https://github.com}"
 GITHUB_API_URL="${PGSANDBOX_GITHUB_API_URL:-https://api.github.com}"
-BINARY_NAME="pgsandbox-mcp"
+BINARY_NAME="pgsandbox"
 
 if [ -n "${PGSANDBOX_INSTALL_DIR:-}" ]; then
   INSTALL_DIR="$PGSANDBOX_INSTALL_DIR"
@@ -154,8 +154,8 @@ fi
 VERSION="${VERSION#v}"
 RELEASE_TAG="v$VERSION"
 TARGET="${PGSANDBOX_TARGET:-$(detect_target)}"
-ASSET="pgsandbox-mcp-$VERSION-$TARGET.tar.gz"
-CHECKSUMS="pgsandbox-mcp-$VERSION-checksums.txt"
+ASSET="pgsandbox-$VERSION-$TARGET.tar.gz"
+CHECKSUMS="pgsandbox-$VERSION-checksums.txt"
 DOWNLOAD_URL="$GITHUB_BASE_URL/$REPO/releases/download/$RELEASE_TAG/$ASSET"
 CHECKSUM_URL="$GITHUB_BASE_URL/$REPO/releases/download/$RELEASE_TAG/$CHECKSUMS"
 
@@ -198,4 +198,4 @@ case ":${PATH:-}:" in
   *) warn "$INSTALL_DIR is not on PATH" ;;
 esac
 
-say "Next: run \`pgsandbox-mcp setup --client codex\`, then \`pgsandbox-mcp doctor\`"
+say "Next: run \`pgsandbox setup --client codex\`, then \`pgsandbox doctor\`"

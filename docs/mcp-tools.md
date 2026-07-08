@@ -26,6 +26,19 @@ that envelope.
 - `detailHandles`: opaque pointers agents can use in follow-up calls
 - `result`: workflow-specific output when available
 
+The same contracts are available through the `pgsandbox` CLI. Use the
+hyphenated command form for shell usage or the exact MCP name through
+`pgsandbox tool`:
+
+```bash
+pgsandbox create-database --name-hint "migration check" --ttl-minutes 30
+pgsandbox run-sql --database-id "$DATABASE_ID" --sql "select 1" --readonly
+pgsandbox tool schema_digest --input "{\"databaseId\":\"$DATABASE_ID\"}"
+```
+
+CLI commands return the same envelope shape. `--input` and `--input-file`
+accept the camelCase JSON objects documented below.
+
 Creation-style tools return `connectionStringRedacted` for safe summaries and
 task trackers. They also return `connectionStringsRedacted`, which always
 contains `direct` and may contain `localContainer` when a loopback host such as
@@ -255,7 +268,7 @@ Returns:
 - `lines`: bounded human-readable diagnostic lines with passwords masked
 
 Agents should call this when troubleshooting connectivity, version discovery,
-or MCP setup problems. It is the MCP equivalent of `pgsandbox-mcp doctor`.
+or MCP setup problems. It is the MCP equivalent of `pgsandbox doctor`.
 
 ## `clone_database`
 
@@ -572,7 +585,7 @@ Returns:
 
 ## Schema Snapshots
 
-Schema snapshots are explicit named checkpoints stored under PG Sandbox's local
+Schema snapshots are explicit named checkpoints stored under PGSandbox's local
 state directory. They are not automatic truth; create a new snapshot whenever a
 new before-state matters.
 
@@ -758,7 +771,7 @@ as `run_repo_command`, with `result.exitCode: null` and
 
 ## Template Tools
 
-Templates are local artifacts under PG Sandbox's managed state directory. They
+Templates are local artifacts under PGSandbox's managed state directory. They
 are created only from PGSandbox-owned databases and restored into newly tracked
 PGSandbox-owned sandboxes. They use `pg_dump`/`pg_restore` and are not
 copy-on-write forks, hosted snapshots, or production-data workflows.

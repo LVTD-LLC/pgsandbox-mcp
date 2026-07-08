@@ -1,6 +1,6 @@
-# PGSandbox MCP
+# PGSandbox
 
-PGSandbox MCP is a local-first Rust CLI and MCP stdio server that lets coding
+PGSandbox is a local-first Rust CLI and MCP stdio server that lets coding
 agents create, inspect, use, clone, and delete disposable PostgreSQL databases.
 It is for engineers who want agents to validate migrations, SQL, seed data, and
 backend bug reproductions against a real isolated database without touching a
@@ -45,7 +45,7 @@ shared developer database.
 ## Tech Stack
 
 - **Language**: Rust 2021 edition
-- **Runtime**: Native CLI binary named `pgsandbox-mcp`
+- **Runtime**: Native CLI binary named `pgsandbox`
 - **MCP Framework**: `rmcp` stdio server
 - **Async Runtime**: Tokio
 - **Database Client**: `tokio-postgres`
@@ -100,22 +100,22 @@ users who intentionally want an external local Postgres profile.
 ## Getting Started
 
 These steps are for a normal user who wants to install the released
-`pgsandbox-mcp` binary and use it from an MCP client. You do not need to clone
+`pgsandbox` binary and use it from an MCP client. You do not need to clone
 this repository, install Rust, or run Cargo for the standard setup.
 
-### 1. Install PGSandbox MCP
+### 1. Install PGSandbox
 
 Homebrew is the recommended install path:
 
 ```bash
-brew install LVTD-LLC/tap/pgsandbox-mcp
+brew install LVTD-LLC/tap/pgsandbox
 ```
 
 If you do not use Homebrew, install the latest GitHub release binary with the
 hosted installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox-mcp/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox/main/scripts/install.sh | sh
 ```
 
 If the installer uses `~/.local/bin`, make sure that directory is on your
@@ -124,7 +124,7 @@ If the installer uses `~/.local/bin`, make sure that directory is on your
 Verify the installed binary:
 
 ```bash
-pgsandbox-mcp --version
+pgsandbox --version
 ```
 
 ### 2. Run Setup
@@ -132,10 +132,10 @@ pgsandbox-mcp --version
 Pick the client you use:
 
 ```bash
-pgsandbox-mcp setup --client codex
-pgsandbox-mcp setup --client cursor
-pgsandbox-mcp setup --client vscode
-pgsandbox-mcp setup --client claude-desktop
+pgsandbox setup --client codex
+pgsandbox setup --client cursor
+pgsandbox setup --client vscode
+pgsandbox setup --client claude-desktop
 ```
 
 `setup` does the normal local setup work for you:
@@ -150,8 +150,8 @@ pgsandbox-mcp setup --client claude-desktop
 For Cursor or VS Code project-local config:
 
 ```bash
-pgsandbox-mcp setup --client cursor --scope project
-pgsandbox-mcp setup --client vscode --scope project
+pgsandbox setup --client cursor --scope project
+pgsandbox setup --client vscode --scope project
 ```
 
 By default, setup does not write `PGSANDBOX_ADMIN_DATABASE_URL`. That is
@@ -162,7 +162,7 @@ Only pass `--admin-url` when you intentionally want to use an explicit external
 local/private Postgres admin profile:
 
 ```bash
-pgsandbox-mcp setup --client codex --admin-url "$PGSANDBOX_ADMIN_DATABASE_URL"
+pgsandbox setup --client codex --admin-url "$PGSANDBOX_ADMIN_DATABASE_URL"
 ```
 
 ### 3. Restart Your MCP Client
@@ -184,13 +184,13 @@ Verify that the `pgsandbox` server appears.
 Run diagnostics:
 
 ```bash
-pgsandbox-mcp doctor
+pgsandbox doctor
 ```
 
 Run the disposable end-to-end check:
 
 ```bash
-pgsandbox-mcp smoke-test
+pgsandbox smoke-test
 ```
 
 The smoke test creates a sandbox, runs SQL, validates serialization behavior,
@@ -199,8 +199,8 @@ and deletes the sandbox before exiting.
 You can also inspect the managed local runtime directly:
 
 ```bash
-pgsandbox-mcp local status
-pgsandbox-mcp local start
+pgsandbox local status
+pgsandbox local start
 ```
 
 The runtime starts at port `65432` and scans upward for a free port. It should
@@ -209,13 +209,35 @@ not collide with Docker or another developer Postgres already using `5432`.
 ### 5. Use A Sandbox
 
 Ask your agent to create a disposable Postgres sandbox for the task. A typical
-agent workflow is:
+MCP workflow is:
 
 1. Create a sandbox with `create_database`.
 2. Run SQL with `run_sql` or run a repo command with `run_repo_command`.
 3. Inspect schema with `describe_schema` or `schema_digest`.
 4. Delete the sandbox with `delete_database`, or let TTL cleanup remove it
    later.
+
+Agents that prefer shell commands can run the same tool contracts directly
+through the CLI:
+
+```bash
+pgsandbox create-database --name-hint "migration check" --ttl-minutes 30
+pgsandbox run-sql --database-id "$DATABASE_ID" --sql "select 1" --readonly
+pgsandbox delete-database --database-id "$DATABASE_ID"
+```
+
+Every MCP tool has a CLI command. Use hyphenated command names for normal shell
+usage, or call the exact MCP tool name through `tool`:
+
+```bash
+pgsandbox schema-digest --database-id "$DATABASE_ID"
+pgsandbox tool schema_digest --input "{\"databaseId\":\"$DATABASE_ID\"}"
+pgsandbox run-repo-command --database-id "$DATABASE_ID" --repo-path "$PWD" -- npm run migrate
+```
+
+`--input` and `--input-file` accept the same camelCase JSON objects documented
+for MCP tools, so the CLI can reach the full tool surface without adding a
+custom flag for every field.
 
 If your application runs inside Docker while PGSandbox runs on the host, call
 `get_connection_string` with `includeCredentials: true` and pass
@@ -232,22 +254,22 @@ extra_hosts:
 For direct CLI troubleshooting, this command starts the MCP server over stdio:
 
 ```bash
-pgsandbox-mcp
+pgsandbox mcp
 ```
 
 You normally do not run it yourself; your MCP client launches it.
 
 ## Development From This Repo
 
-Use this section when contributing to PGSandbox MCP, testing unreleased changes,
+Use this section when contributing to PGSandbox, testing unreleased changes,
 or pointing an MCP client at a local development build. Normal users should use
 the packaged setup in [Getting Started](#getting-started).
 
 ### 1. Clone The Repository
 
 ```bash
-git clone https://github.com/LVTD-LLC/pgsandbox-mcp.git
-cd pgsandbox-mcp
+git clone https://github.com/LVTD-LLC/pgsandbox.git
+cd pgsandbox
 ```
 
 ### 2. Install Toolchains
@@ -289,7 +311,7 @@ cargo run -- smoke-test
 The development binary is created at:
 
 ```text
-target/debug/pgsandbox-mcp
+target/debug/pgsandbox
 ```
 
 For an optimized release build:
@@ -305,22 +327,22 @@ not accidentally launch a separately installed release:
 
 ```bash
 cargo build
-cargo run -- setup --client codex --command "$(pwd)/target/debug/pgsandbox-mcp"
+cargo run -- setup --client codex --command "$(pwd)/target/debug/pgsandbox"
 ```
 
 Other supported clients:
 
 ```bash
-cargo run -- setup --client cursor --scope project --command "$(pwd)/target/debug/pgsandbox-mcp"
-cargo run -- setup --client vscode --scope project --command "$(pwd)/target/debug/pgsandbox-mcp"
-cargo run -- setup --client claude-desktop --command "$(pwd)/target/debug/pgsandbox-mcp"
-cargo run -- setup --client all --command "$(pwd)/target/debug/pgsandbox-mcp"
+cargo run -- setup --client cursor --scope project --command "$(pwd)/target/debug/pgsandbox"
+cargo run -- setup --client vscode --scope project --command "$(pwd)/target/debug/pgsandbox"
+cargo run -- setup --client claude-desktop --command "$(pwd)/target/debug/pgsandbox"
+cargo run -- setup --client all --command "$(pwd)/target/debug/pgsandbox"
 ```
 
 Use `--dry-run` to inspect the config without writing it:
 
 ```bash
-cargo run -- setup --client codex --dry-run --command "$(pwd)/target/debug/pgsandbox-mcp"
+cargo run -- setup --client codex --dry-run --command "$(pwd)/target/debug/pgsandbox"
 ```
 
 Restart the MCP client after setup. MCP clients cache tool metadata.
@@ -336,7 +358,7 @@ cargo run
 Equivalent explicit form:
 
 ```bash
-cargo run -- stdio
+cargo run -- mcp
 ```
 
 You usually do not run this command directly because the MCP client owns the
@@ -409,9 +431,10 @@ PGSandbox is one native binary with multiple command modes:
 User or MCP client
         |
         v
-pgsandbox-mcp CLI
+pgsandbox CLI
         |
-        +-- stdio MCP server
+        +-- mcp stdio server
+        +-- direct CLI tool commands
         +-- setup config writer
         +-- doctor diagnostics
         +-- local Postgres runtime manager
@@ -426,7 +449,7 @@ is a managed local Postgres cluster. External profiles are opt-in.
 Agent / MCP client
         |
         v
-PGSandbox MCP stdio server
+PGSandbox stdio MCP mode
         |
         v
 Managed local cluster or explicit Postgres admin profile
@@ -437,25 +460,29 @@ Tracked sandbox databases and scoped sandbox roles
 
 ### Entry Points
 
-- `rust-src/main.rs` starts Tokio and calls `pgsandbox_mcp::cli::run`.
-- `rust-src/cli.rs` defaults to `stdio` when no command is provided.
+- `rust-src/main.rs` starts Tokio and calls `pgsandbox::cli::run`.
+- `rust-src/cli.rs` defaults to MCP stdio when no command is provided.
 - `rust-src/mcp.rs` exposes the public MCP tools.
 - `rust-src/postgres.rs` owns lifecycle behavior and database interactions.
 
 CLI commands:
 
 ```text
-pgsandbox-mcp
-pgsandbox-mcp stdio
-pgsandbox-mcp setup [options]
-pgsandbox-mcp doctor [options]
-pgsandbox-mcp local init [options]
-pgsandbox-mcp local start [options]
-pgsandbox-mcp local stop [options]
-pgsandbox-mcp local status [options]
-pgsandbox-mcp smoke-test [options]
-pgsandbox-mcp --version
-pgsandbox-mcp --help
+pgsandbox
+pgsandbox mcp
+pgsandbox setup [options]
+pgsandbox doctor [options]
+pgsandbox create-database [options]
+pgsandbox run-sql [options]
+pgsandbox delete-database [options]
+pgsandbox tool <mcp_tool_name> --input '{...}'
+pgsandbox local init [options]
+pgsandbox local start [options]
+pgsandbox local stop [options]
+pgsandbox local status [options]
+pgsandbox smoke-test [options]
+pgsandbox --version
+pgsandbox --help
 ```
 
 ### Managed Local Runtime
@@ -484,7 +511,7 @@ Log:                 ~/.pgsandbox/postgres/versions/18/postgres.log
 Start a specific installed version:
 
 ```bash
-pgsandbox-mcp local start --postgres-version 18
+pgsandbox local start --postgres-version 18
 ```
 
 PGSandbox probes common local install paths for installed Postgres 18, 17, 16,
@@ -676,8 +703,8 @@ installed extension names and versions:
 The CLI exposes the same discovery path and prints JSON:
 
 ```bash
-pgsandbox-mcp list-extensions --postgres-version 18
-pgsandbox-mcp list-extensions --database-name pgsandbox_example_abc123
+pgsandbox list-extensions --postgres-version 18
+pgsandbox list-extensions --database-name pgsandbox_example_abc123
 ```
 
 `create_database` and `clone_database` accept an optional `extensions` list:
@@ -980,7 +1007,7 @@ These variables are consumed by `scripts/install.sh`:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `PGSANDBOX_REPO` | GitHub repo to download releases from. | `LVTD-LLC/pgsandbox-mcp` |
+| `PGSANDBOX_REPO` | GitHub repo to download releases from. | `LVTD-LLC/pgsandbox` |
 | `PGSANDBOX_GITHUB_BASE_URL` | GitHub web base URL. | `https://github.com` |
 | `PGSANDBOX_GITHUB_API_URL` | GitHub API base URL. | `https://api.github.com` |
 | `PGSANDBOX_INSTALL_DIR` | Directory for the installed binary. | `~/.local/bin` or `/usr/local/bin` |
@@ -991,7 +1018,7 @@ These variables are consumed by `scripts/install.sh`:
 Pin the current manifest version explicitly:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox-mcp/main/scripts/install.sh \
+curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox/main/scripts/install.sh \
   | PGSANDBOX_VERSION=0.4.7 sh
 ```
 
@@ -1060,7 +1087,7 @@ Use it:
 
 ```bash
 export PGSANDBOX_CONFIG="$PWD/pgsandbox.config.json"
-pgsandbox-mcp doctor
+pgsandbox doctor
 ```
 
 For a private remote host, opt in explicitly:
@@ -1090,7 +1117,7 @@ Run root scripts from the repository root.
 | `npm run build` | Run `cargo build --release`. |
 | `npm run typecheck` | Alias for `cargo check`. |
 | `npm run start` | Run `cargo run --`. |
-| `npm run package:homebrew` | Build release binary and create `dist/pgsandbox-mcp-<version>.tar.gz` for the Homebrew formula flow. |
+| `npm run package:homebrew` | Build release binary and create `dist/pgsandbox-<version>.tar.gz` for the Homebrew formula flow. |
 | `npm run package:release` | Build target-specific release archive and checksum file in `dist/`. |
 | `npm run site:build` | Run the Astro site build through the root package. |
 | `npm run site:check-changelog` | Verify site changelog fallback content. |
@@ -1114,26 +1141,30 @@ CLI commands after installation:
 
 | Command | Description |
 |---------|-------------|
-| `pgsandbox-mcp` | Start stdio MCP server. |
-| `pgsandbox-mcp stdio` | Start stdio MCP server explicitly. |
-| `pgsandbox-mcp setup --client codex` | Prepare managed local Postgres and write user-scoped Codex MCP config. |
-| `pgsandbox-mcp setup --client cursor --scope project` | Prepare managed local Postgres and write project `.cursor/mcp.json`. |
-| `pgsandbox-mcp setup --client vscode --scope project` | Prepare managed local Postgres and write project `.vscode/mcp.json`. |
-| `pgsandbox-mcp setup --client claude-desktop` | Prepare managed local Postgres and write Claude Desktop user config. |
-| `pgsandbox-mcp setup --client all` | Prepare managed local Postgres and write supported user-scoped configs. |
-| `pgsandbox-mcp setup --client codex --dry-run` | Print intended config without writing or preparing local Postgres. |
-| `pgsandbox-mcp doctor` | Check config and Postgres connectivity. |
-| `pgsandbox-mcp doctor --postgres-version 18` | Check a requested managed local major version. |
-| `pgsandbox-mcp ensure-postgres --postgres-version 13` | Install missing local Postgres 13 binaries with a supported package manager when available, then start `local-pg13`. |
-| `pgsandbox-mcp upgrade` | Upgrade Homebrew/install-script installs, rerun setup for all clients, and run doctor. |
-| `pgsandbox-mcp upgrade --setup codex` | Upgrade and only refresh the Codex config. |
-| `pgsandbox-mcp local init` | Initialize managed local Postgres without starting it. |
-| `pgsandbox-mcp local start` | Initialize if needed and start managed local Postgres. |
-| `pgsandbox-mcp local status` | Show managed local status. |
-| `pgsandbox-mcp local stop` | Stop managed local Postgres. |
-| `pgsandbox-mcp local start --postgres-version 18 --install-missing` | Start versioned local profile `local-pg18`, installing binaries with a supported package manager when available. |
-| `pgsandbox-mcp smoke-test` | Create, query, and delete a sandbox. |
-| `pgsandbox-mcp smoke-test --postgres-version 18` | Smoke test a specific local major version. |
+| `pgsandbox` | Start stdio MCP server. |
+| `pgsandbox mcp` | Start stdio MCP server explicitly. |
+| `pgsandbox setup --client codex` | Prepare managed local Postgres and write user-scoped Codex MCP config. |
+| `pgsandbox setup --client cursor --scope project` | Prepare managed local Postgres and write project `.cursor/mcp.json`. |
+| `pgsandbox setup --client vscode --scope project` | Prepare managed local Postgres and write project `.vscode/mcp.json`. |
+| `pgsandbox setup --client claude-desktop` | Prepare managed local Postgres and write Claude Desktop user config. |
+| `pgsandbox setup --client all` | Prepare managed local Postgres and write supported user-scoped configs. |
+| `pgsandbox setup --client codex --dry-run` | Print intended config without writing or preparing local Postgres. |
+| `pgsandbox doctor` | Check config and Postgres connectivity. |
+| `pgsandbox doctor --postgres-version 18` | Check a requested managed local major version. |
+| `pgsandbox create-database --name-hint task --ttl-minutes 30` | Create a tracked sandbox through the CLI. |
+| `pgsandbox run-sql --database-id <id> --sql "select 1" --readonly` | Run bounded SQL through the sandbox role. |
+| `pgsandbox delete-database --database-id <id>` | Delete a metadata-owned sandbox. |
+| `pgsandbox tool <mcp_tool_name> --input '{...}'` | Run any MCP tool contract from the shell with camelCase JSON input. |
+| `pgsandbox ensure-postgres --postgres-version 13` | Install missing local Postgres 13 binaries with a supported package manager when available, then start `local-pg13`. |
+| `pgsandbox upgrade` | Upgrade Homebrew/install-script installs, rerun setup for all clients, and run doctor. |
+| `pgsandbox upgrade --setup codex` | Upgrade and only refresh the Codex config. |
+| `pgsandbox local init` | Initialize managed local Postgres without starting it. |
+| `pgsandbox local start` | Initialize if needed and start managed local Postgres. |
+| `pgsandbox local status` | Show managed local status. |
+| `pgsandbox local stop` | Stop managed local Postgres. |
+| `pgsandbox local start --postgres-version 18 --install-missing` | Start versioned local profile `local-pg18`, installing binaries with a supported package manager when available. |
+| `pgsandbox smoke-test` | Create, query, and delete a sandbox. |
+| `pgsandbox smoke-test --postgres-version 18` | Smoke test a specific local major version. |
 
 Site commands:
 
@@ -1243,7 +1274,7 @@ PGSANDBOX_EXTENSION_E2E=1 PGSANDBOX_EXTENSION_E2E_NAME=citext \
 
 Each live test creates a sandbox and attempts cleanup at the end. If cleanup
 fails, the test prints the failure so you can remove the sandbox with the MCP
-tool or with `pgsandbox-mcp smoke-test`/manual diagnostics. Live tests use the
+tool or with `pgsandbox smoke-test`/manual diagnostics. Live tests use the
 normal PGSandbox config path: the managed local runtime when no explicit config
 is set, or the configured `PGSANDBOX_ADMIN_DATABASE_URL`/`PGSANDBOX_CONFIG`
 profile when present.
@@ -1253,17 +1284,17 @@ profile when present.
 Useful local runtime checks:
 
 ```bash
-pgsandbox-mcp local status
-pgsandbox-mcp doctor
-pgsandbox-mcp smoke-test
+pgsandbox local status
+pgsandbox doctor
+pgsandbox smoke-test
 ```
 
 For a versioned local runtime:
 
 ```bash
-pgsandbox-mcp local status --postgres-version 18
-pgsandbox-mcp doctor --postgres-version 18
-pgsandbox-mcp smoke-test --postgres-version 18
+pgsandbox local status --postgres-version 18
+pgsandbox doctor --postgres-version 18
+pgsandbox smoke-test --postgres-version 18
 ```
 
 ### Packaging Checks
@@ -1280,7 +1311,7 @@ them by hand.
 
 PGSandbox has two separate deployable artifacts:
 
-1. The native `pgsandbox-mcp` CLI/MCP binary.
+1. The native `pgsandbox` CLI/MCP binary.
 2. The static Astro website under `site/`.
 
 The MCP server is intended to run locally or on a private trusted machine as a
@@ -1295,10 +1326,10 @@ This is the same recommended packaged path shown in
 Recommended user flow:
 
 ```bash
-brew install LVTD-LLC/tap/pgsandbox-mcp
-pgsandbox-mcp setup --client codex
-pgsandbox-mcp doctor
-pgsandbox-mcp smoke-test
+brew install LVTD-LLC/tap/pgsandbox
+pgsandbox setup --client codex
+pgsandbox doctor
+pgsandbox smoke-test
 ```
 
 The formula lives in
@@ -1311,28 +1342,28 @@ verify that the `pgsandbox` server is available.
 ### Install Released Binary With The Script
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox-mcp/main/scripts/install.sh | sh
-pgsandbox-mcp setup --client codex
-pgsandbox-mcp doctor
+curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox/main/scripts/install.sh | sh
+pgsandbox setup --client codex
+pgsandbox doctor
 ```
 
 The script downloads a platform-specific release archive, verifies checksums
-when the release includes `pgsandbox-mcp-<version>-checksums.txt`, and installs
+when the release includes `pgsandbox-<version>-checksums.txt`, and installs
 to `~/.local/bin` by default.
 
 Install the current manifest version explicitly:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox-mcp/main/scripts/install.sh \
+curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox/main/scripts/install.sh \
   | PGSANDBOX_VERSION=0.4.7 sh
 ```
 
 Install to a custom directory:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox-mcp/main/scripts/install.sh \
+curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox/main/scripts/install.sh \
   | PGSANDBOX_INSTALL_DIR=/usr/local/bin sh
-pgsandbox-mcp setup --client codex --command /usr/local/bin/pgsandbox-mcp
+pgsandbox setup --client codex --command /usr/local/bin/pgsandbox
 ```
 
 ### Install From Source For Development
@@ -1345,16 +1376,16 @@ From a checkout:
 
 ```bash
 cargo install --path . --force
-pgsandbox-mcp setup --client codex
-pgsandbox-mcp doctor
+pgsandbox setup --client codex
+pgsandbox doctor
 ```
 
 From GitHub:
 
 ```bash
-cargo install --git https://github.com/LVTD-LLC/pgsandbox-mcp --tag v0.4.7 --force
-pgsandbox-mcp setup --client codex
-pgsandbox-mcp doctor
+cargo install --git https://github.com/LVTD-LLC/pgsandbox --tag v0.4.7 --force
+pgsandbox setup --client codex
+pgsandbox doctor
 ```
 
 ### Update An Existing Installation
@@ -1362,7 +1393,7 @@ pgsandbox-mcp doctor
 For Homebrew and GitHub install-script installs, the shortest path is:
 
 ```bash
-pgsandbox-mcp upgrade
+pgsandbox upgrade
 ```
 
 `upgrade` updates the installed binary, reruns `setup --client all`, runs
@@ -1377,37 +1408,37 @@ To update only one client config, skip post-upgrade steps, or pin a GitHub
 installer release:
 
 ```bash
-pgsandbox-mcp upgrade --setup codex
-pgsandbox-mcp upgrade --no-setup
-pgsandbox-mcp upgrade --no-doctor
-pgsandbox-mcp upgrade --version 0.4.7
+pgsandbox upgrade --setup codex
+pgsandbox upgrade --no-setup
+pgsandbox upgrade --no-doctor
+pgsandbox upgrade --version 0.4.7
 ```
 
 Homebrew:
 
 ```bash
 brew update
-brew upgrade LVTD-LLC/tap/pgsandbox-mcp
-pgsandbox-mcp --version
-pgsandbox-mcp setup --client codex
-pgsandbox-mcp doctor
+brew upgrade LVTD-LLC/tap/pgsandbox
+pgsandbox --version
+pgsandbox setup --client codex
+pgsandbox doctor
 ```
 
 Install script:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox-mcp/main/scripts/install.sh | sh
-pgsandbox-mcp --version
-pgsandbox-mcp setup --client codex
-pgsandbox-mcp doctor
+curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox/main/scripts/install.sh | sh
+pgsandbox --version
+pgsandbox setup --client codex
+pgsandbox doctor
 ```
 
 Source install for development:
 
 ```bash
 cargo install --path . --force
-pgsandbox-mcp setup --client codex
-pgsandbox-mcp doctor
+pgsandbox setup --client codex
+pgsandbox doctor
 ```
 
 Rerun `setup` when the binary path, explicit admin URL, selected client, or
@@ -1415,38 +1446,38 @@ scope changes. Restart the MCP client after updating.
 
 ### MCP Client Rollout
 
-`pgsandbox-mcp setup` writes config while preserving unrelated servers.
+`pgsandbox setup` writes config while preserving unrelated servers.
 
 Codex user config:
 
 ```bash
-pgsandbox-mcp setup --client codex
+pgsandbox setup --client codex
 ```
 
 Cursor project config:
 
 ```bash
-pgsandbox-mcp setup --client cursor --scope project
+pgsandbox setup --client cursor --scope project
 ```
 
 VS Code project config:
 
 ```bash
-pgsandbox-mcp setup --client vscode --scope project
+pgsandbox setup --client vscode --scope project
 ```
 
 Claude Desktop user config:
 
 ```bash
-pgsandbox-mcp setup --client claude-desktop
+pgsandbox setup --client claude-desktop
 ```
 
 A generated Codex config entry looks like:
 
 ```toml
 [mcp_servers.pgsandbox]
-command = "pgsandbox-mcp"
-args = ["stdio"]
+command = "pgsandbox"
+args = ["mcp"]
 ```
 
 If you intentionally configure an external Postgres admin URL, `setup` writes
@@ -1454,7 +1485,7 @@ it into the client config environment so desktop clients do not depend on shell
 startup files:
 
 ```bash
-pgsandbox-mcp setup \
+pgsandbox setup \
   --client codex \
   --admin-url "$PGSANDBOX_ADMIN_DATABASE_URL"
 ```
@@ -1481,20 +1512,20 @@ npm run package:release
 `npm run package:homebrew` creates:
 
 ```text
-dist/pgsandbox-mcp-<version>.tar.gz
+dist/pgsandbox-<version>.tar.gz
 ```
 
 `npm run package:release` creates:
 
 ```text
-dist/pgsandbox-mcp-<version>-<target>.tar.gz
-dist/pgsandbox-mcp-<version>-checksums.txt
+dist/pgsandbox-<version>-<target>.tar.gz
+dist/pgsandbox-<version>-checksums.txt
 ```
 
 When a GitHub release is published,
 `.github/workflows/update-homebrew-tap.yml` downloads or builds the Homebrew
 archive, computes SHA-256, checks out `LVTD-LLC/homebrew-tap`, updates
-`Formula/pgsandbox-mcp.rb`, and opens or updates a PR.
+`Formula/pgsandbox.rb`, and opens or updates a PR.
 
 The workflow requires the `HOMEBREW_TAP_PAT` repository secret with write access
 to the tap repository.
@@ -1536,8 +1567,8 @@ users who want to test explicit external profile mode:
 ```bash
 docker compose -f docker-compose.example.yml up -d
 export PGSANDBOX_ADMIN_DATABASE_URL="postgres://postgres:postgres@localhost:5432/postgres"
-pgsandbox-mcp doctor
-pgsandbox-mcp smoke-test
+pgsandbox doctor
+pgsandbox smoke-test
 ```
 
 This is optional. Runtime code must not require Docker.
@@ -1551,7 +1582,7 @@ supported package manager when available, starts the managed local cluster, and
 writes MCP config:
 
 ```bash
-pgsandbox-mcp setup --client codex
+pgsandbox setup --client codex
 ```
 
 If setup cannot install PostgreSQL automatically, install the server binaries
@@ -1559,23 +1590,23 @@ with your system package manager and point PGSandbox at their bin directory:
 
 ```bash
 export PGSANDBOX_POSTGRES_BIN_DIR="/path/to/postgres/bin"
-pgsandbox-mcp setup --client codex
-pgsandbox-mcp doctor
+pgsandbox setup --client codex
+pgsandbox doctor
 ```
 
 For a requested major version, let PGSandbox install the package when your
 system package manager still provides it:
 
 ```bash
-pgsandbox-mcp ensure-postgres --postgres-version 14
-pgsandbox-mcp setup --client codex --postgres-version 14
+pgsandbox ensure-postgres --postgres-version 14
+pgsandbox setup --client codex --postgres-version 14
 ```
 
 For an older major such as Postgres 13:
 
 ```bash
-pgsandbox-mcp ensure-postgres --postgres-version 13
-pgsandbox-mcp setup --client codex --postgres-version 13
+pgsandbox ensure-postgres --postgres-version 13
+pgsandbox setup --client codex --postgres-version 13
 ```
 
 From MCP, agents can call `ensure_postgres` before creating a sandbox:
@@ -1597,7 +1628,7 @@ existing server binaries:
 
 ```bash
 export PGSANDBOX_POSTGRES_13_BIN_DIR="/opt/homebrew/opt/postgresql@13/bin"
-pgsandbox-mcp setup --client codex --postgres-version 13
+pgsandbox setup --client codex --postgres-version 13
 ```
 
 ### Requested Postgres Version Is Missing
@@ -1605,7 +1636,7 @@ pgsandbox-mcp setup --client codex --postgres-version 13
 List discovered local versions:
 
 ```bash
-pgsandbox-mcp doctor
+pgsandbox doctor
 ```
 
 From MCP, call `list_profiles` with:
@@ -1623,8 +1654,8 @@ This is expected and should not be a problem. The managed local runtime starts
 at `65432` and scans upward.
 
 ```bash
-pgsandbox-mcp local start
-pgsandbox-mcp local status
+pgsandbox local start
+pgsandbox local status
 ```
 
 If you intentionally want to use the service on `5432`, set an explicit admin
@@ -1636,30 +1667,30 @@ If `doctor` reports that it is using an admin URL from an MCP config but you
 want managed local, rerun setup without `--admin-url`:
 
 ```bash
-pgsandbox-mcp setup --client codex
+pgsandbox setup --client codex
 ```
 
 Restart the MCP client and rerun:
 
 ```bash
-pgsandbox-mcp doctor
+pgsandbox doctor
 ```
 
-### `pgsandbox-mcp --version` Shows A Node.js Stack Trace
+### `pgsandbox --version` Shows A Node.js Stack Trace
 
 An old npm/global install may be earlier in `PATH`.
 
 ```bash
-which -a pgsandbox-mcp
-/opt/homebrew/bin/pgsandbox-mcp --version
+which -a pgsandbox
+/opt/homebrew/bin/pgsandbox --version
 ```
 
 Remove the stale install or point the MCP client at the native binary:
 
 ```bash
-npm uninstall -g pgsandbox-mcp
+npm uninstall -g pgsandbox
 hash -r 2>/dev/null || rehash
-pgsandbox-mcp setup --client codex --command /opt/homebrew/bin/pgsandbox-mcp
+pgsandbox setup --client codex --command /opt/homebrew/bin/pgsandbox
 ```
 
 ### `clone_database` Or Template Restore Fails
@@ -1797,7 +1828,7 @@ state root:
 
 ```bash
 export PGSANDBOX_HOME="$HOME/.local/state/pgsandbox"
-pgsandbox-mcp local start
+pgsandbox local start
 ```
 
 ### Old Unix Socket Path After Upgrade
@@ -1806,8 +1837,8 @@ TCP connections continue to work. If a local Unix-socket consumer needs the new
 short socket path under `/tmp/pgsandbox-sockets/`, restart the local runtime:
 
 ```bash
-pgsandbox-mcp local stop
-pgsandbox-mcp local start
+pgsandbox local stop
+pgsandbox local start
 ```
 
 ### External Admin URL Is Refused

@@ -1,4 +1,4 @@
-# PGSandbox MCP Site
+# PGSandbox Site
 
 The Astro site keeps blog posts in `src/content/blog`. Each Markdown file uses
 frontmatter validated by `src/content.config.ts`; the filename becomes the blog

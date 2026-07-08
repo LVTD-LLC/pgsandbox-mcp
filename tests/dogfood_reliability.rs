@@ -1,6 +1,6 @@
 use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
 
-use pgsandbox_mcp::{
+use pgsandbox::{
     config::load_config,
     postgres::{
         CloneDatabaseInput, CreateDatabaseInput, CreateSandboxFromTemplateInput,

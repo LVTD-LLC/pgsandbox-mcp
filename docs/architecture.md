@@ -18,7 +18,7 @@ billing, and faster clone/fork backends.
 Agent / MCP client
         |
         v
-PGSandbox MCP
+PGSandbox
         |
         v
 Managed local cluster or explicit Postgres profile
@@ -117,8 +117,8 @@ sets `unix_socket_directories` to a short PGSandbox-owned directory under
 logs, and private config remain under the managed state directory.
 Already-running clusters keep their existing socket directory until the next
 stop/start cycle. After upgrading from a version that stored sockets under
-`PGSANDBOX_HOME`, run `pgsandbox-mcp local stop` and then
-`pgsandbox-mcp local start` if a local Unix-socket consumer needs the new short
+`PGSANDBOX_HOME`, run `pgsandbox local stop` and then
+`pgsandbox local start` if a local Unix-socket consumer needs the new short
 path immediately.
 
 ## Profiles
@@ -162,7 +162,7 @@ Cleanup should only delete databases listed in the metadata table and matching t
 
 ## Schema Snapshots
 
-Schema snapshots are explicit named checkpoints stored under PG Sandbox's local
+Schema snapshots are explicit named checkpoints stored under PGSandbox's local
 state directory, not inside the application repo and not in the admin database.
 Each snapshot records:
 
@@ -180,7 +180,7 @@ should not be treated as current truth after later database changes.
 
 ## Local Templates
 
-Templates are local `pg_dump` artifacts plus JSON metadata under PG Sandbox's
+Templates are local `pg_dump` artifacts plus JSON metadata under PGSandbox's
 managed state directory. A template can only be created from a live
 PGSandbox-owned sandbox found in metadata. Restoring a template creates a fresh
 tracked sandbox with its own role, TTL, owner, and labels.

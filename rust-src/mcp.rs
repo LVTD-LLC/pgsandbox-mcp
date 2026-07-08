@@ -26,7 +26,7 @@ use crate::{
 };
 
 const TOOL_ENVELOPE_MARKER: &str = "__pgsandboxEnvelope";
-const ADMIN_AUTH_HINT: &str = "Run `pgsandbox-mcp doctor` to identify the active config source. If an MCP client config has a stale explicit PGSANDBOX_ADMIN_DATABASE_URL, run `pgsandbox-mcp setup --client <client>` without --admin-url, restart the MCP client, and retry.";
+const ADMIN_AUTH_HINT: &str = "Run `pgsandbox doctor` to identify the active config source. If an MCP client config has a stale explicit PGSANDBOX_ADMIN_DATABASE_URL, run `pgsandbox setup --client <client>` without --admin-url, restart the MCP client, and retry.";
 const SOURCE_DATABASE_URL_HINT: &str = "Check `sourceDatabaseUrl` credentials, source database name, host/port reachability, and permissions. This failure happened while inspecting or reading the source database for clone_database.";
 
 pub const PUBLIC_MCP_TOOLS: &[&str] = &[
@@ -504,7 +504,7 @@ impl PgsandboxServer {
         .await
     }
 
-    #[tool(description = "Prepare generic repo workflow metadata for PG Sandbox.")]
+    #[tool(description = "Prepare generic repo workflow metadata for PGSandbox.")]
     async fn prepare_for_repo(
         &self,
         Parameters(input): Parameters<PrepareForRepoInput>,
@@ -801,19 +801,28 @@ fn selector_properties(input: &DatabaseSelector) -> Map<String, Value> {
     ])
 }
 
-fn tool_json<T: Serialize>(result: anyhow::Result<T>) -> Result<CallToolResult, ErrorData> {
+pub fn tool_result_payload<T: Serialize>(
+    result: anyhow::Result<T>,
+) -> anyhow::Result<(bool, Value)> {
     match result {
         Ok(value) => {
-            let payload = serde_json::to_value(value).map_err(internal_error)?;
-            let text = serde_json::to_string_pretty(&normalize_success_payload(payload))
-                .map_err(internal_error)?;
-            Ok(CallToolResult::success(vec![Content::text(text)]))
+            let payload = serde_json::to_value(value)?;
+            Ok((true, normalize_success_payload(payload)))
         }
-        Err(error) => {
-            let text = serde_json::to_string_pretty(&ToolErrorResponse::from_error(&error))
-                .map_err(internal_error)?;
-            Ok(CallToolResult::error(vec![Content::text(text)]))
-        }
+        Err(error) => Ok((
+            false,
+            serde_json::to_value(ToolErrorResponse::from_error(&error))?,
+        )),
+    }
+}
+
+fn tool_json<T: Serialize>(result: anyhow::Result<T>) -> Result<CallToolResult, ErrorData> {
+    let (ok, payload) = tool_result_payload(result).map_err(internal_error)?;
+    let text = serde_json::to_string_pretty(&payload).map_err(internal_error)?;
+    if ok {
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    } else {
+        Ok(CallToolResult::error(vec![Content::text(text)]))
     }
 }
 
@@ -1163,7 +1172,7 @@ impl ToolErrorResponse {
                 detected_versions: detected_postgres_versions(),
                 detail_handle: Some(json!({
                     "type": "diagnostic",
-                    "command": "pgsandbox-mcp doctor"
+                    "command": "pgsandbox doctor"
                 })),
             }
         } else if lower.contains("no configured profile advertises postgresversion")
@@ -1200,7 +1209,7 @@ impl ToolErrorResponse {
                 code: "postgres_connection_failed",
                 category: "postgres",
                 message: chain,
-                hint: "Run `pgsandbox-mcp doctor` to verify the configured profile and connectivity. For managed local, try `pgsandbox-mcp local status` or `pgsandbox-mcp local start`.".to_string(),
+                hint: "Run `pgsandbox doctor` to verify the configured profile and connectivity. For managed local, try `pgsandbox local status` or `pgsandbox local start`.".to_string(),
                 sqlstate: None,
                 requested_version: None,
                 source_version: None,
@@ -1215,7 +1224,7 @@ impl ToolErrorResponse {
                 code: "pgsandbox_tool_failed",
                 category: "unknown",
                 message: chain,
-                hint: "Run `pgsandbox-mcp doctor` for a local diagnostic, then retry the tool with the same profile or postgresVersion.".to_string(),
+                hint: "Run `pgsandbox doctor` for a local diagnostic, then retry the tool with the same profile or postgresVersion.".to_string(),
                 sqlstate: None,
                 requested_version: None,
                 source_version: None,
@@ -1851,7 +1860,7 @@ mod tests {
         assert!(first_error(&value)["hint"]
             .as_str()
             .unwrap()
-            .contains("pgsandbox-mcp doctor"));
+            .contains("pgsandbox doctor"));
         assert!(!text.contains("postgres:postgres@"));
     }
 
