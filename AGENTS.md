@@ -1,14 +1,14 @@
-# PGSandbox MCP Agent Guide
+# PGSandbox Agent Guide
 
 ## Scope
 
 This file is the repo-level operating manual for coding agents working on
-`pgsandbox-mcp`. Apply it to the whole repository unless a more specific
+`pgsandbox`. Apply it to the whole repository unless a more specific
 steering file says otherwise.
 
 ## Project Summary
 
-PGSandbox MCP is a local-first MCP server that lets coding agents create,
+PGSandbox is a local-first MCP server that lets coding agents create,
 inspect, use, and delete disposable Postgres databases. The goal is to make a
 real isolated database the easy default for migrations, SQL validation, seeded
 demo states, and backend bug reproduction.
@@ -47,9 +47,9 @@ cargo build --release
 Useful manual checks with the managed local runtime:
 
 ```bash
-pgsandbox-mcp local status
-pgsandbox-mcp doctor
-pgsandbox-mcp smoke-test
+pgsandbox local status
+pgsandbox doctor
+pgsandbox smoke-test
 ```
 
 Release packaging check:
@@ -99,7 +99,7 @@ npm run package:homebrew
 ## Rowset Task Boards
 
 - When creating or updating Rowset task-board datasets from dogfood or E2E test
-  runs, use the Rowset project `PGSandbox MCP`
+  runs, use the Rowset project `PGSandbox`
   (`d008690f-e78f-4e7c-bcd2-5c1bed537d0a`).
 - Put those datasets in the `Dogfooding Task Boards` section
   (`13aae3f4-de24-4fcf-b13e-a218cbd70914`). This section is for structured issue
@@ -139,7 +139,7 @@ jobs:
       # Use the ReviewGate action's documented invocation here.
 ```
 
-- No PGSandbox MCP Rust code changes are needed for this trigger policy unless
+- No PGSandbox Rust code changes are needed for this trigger policy unless
   the project later ships a generator, installer, or template that writes
   ReviewGate workflow files.
 
@@ -159,5 +159,5 @@ jobs:
 - Release archives and generated outputs are build artifacts; do not hand-edit
   them.
 - `npm run package:homebrew` builds the release archive used by the tap formula.
-- Client setup remains explicit through `pgsandbox-mcp setup`; installers should
+- Client setup remains explicit through `pgsandbox setup`; installers should
   not silently write user MCP configs.

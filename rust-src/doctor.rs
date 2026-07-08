@@ -24,7 +24,7 @@ pub async fn run_doctor(
         "CLI: {}",
         std::env::current_exe()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| "pgsandbox-mcp".to_string())
+            .unwrap_or_else(|_| "pgsandbox".to_string())
     )];
     let available_postgres_versions = discovered_postgres_versions();
     let mut ok = true;
@@ -76,7 +76,7 @@ pub async fn run_doctor(
         if !postgres_ok {
             if let Some(target) = configured_admin_url_target {
                 lines.push(format!(
-                    "Hint: this check used an explicit admin URL from {} {} MCP config. If you want the managed local cluster instead, run `pgsandbox-mcp setup --client {}{}` without `--admin-url`, restart the MCP client, and rerun doctor.",
+                    "Hint: this check used an explicit admin URL from {} {} MCP config. If you want the managed local cluster instead, run `pgsandbox setup --client {}{}` without `--admin-url`, restart the MCP client, and rerun doctor.",
                     target.client,
                     target.scope,
                     target.client,
@@ -145,9 +145,9 @@ fn doctor_config_error_lines(message: &str, available_versions: &[String]) -> Ve
         lines.push(available_versions_line(available_versions));
         lines.push(match requested_version {
             Some(version) => format!(
-                "Hint: run `pgsandbox-mcp setup --client <client> --postgres-version {version}` to let setup prepare the local runtime. If setup cannot install PostgreSQL automatically, set PGSANDBOX_POSTGRES_{version}_BIN_DIR or PGSANDBOX_POSTGRES_BIN_DIR, or choose an available version."
+                "Hint: run `pgsandbox setup --client <client> --postgres-version {version}` to let setup prepare the local runtime. If setup cannot install PostgreSQL automatically, set PGSANDBOX_POSTGRES_{version}_BIN_DIR or PGSANDBOX_POSTGRES_BIN_DIR, or choose an available version."
             ),
-            None => "Hint: run `pgsandbox-mcp setup --client <client>` to let setup prepare the local runtime. If setup cannot install PostgreSQL automatically, set PGSANDBOX_POSTGRES_BIN_DIR or choose an available version.".to_string(),
+            None => "Hint: run `pgsandbox setup --client <client>` to let setup prepare the local runtime. If setup cannot install PostgreSQL automatically, set PGSANDBOX_POSTGRES_BIN_DIR or choose an available version.".to_string(),
         });
         return lines;
     }
@@ -281,7 +281,7 @@ mod tests {
 
         assert!(text.contains("Local Postgres 99 binaries are unavailable."));
         assert!(text.contains("Available local Postgres versions: 16, 18"));
-        assert!(text.contains("pgsandbox-mcp setup --client <client> --postgres-version 99"));
+        assert!(text.contains("pgsandbox setup --client <client> --postgres-version 99"));
         assert!(text.contains("PGSANDBOX_POSTGRES_99_BIN_DIR"));
         assert!(!text.contains("Tried:"));
         assert!(!text.contains("/very/long/path"));

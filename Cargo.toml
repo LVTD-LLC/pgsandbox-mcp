@@ -1,10 +1,10 @@
 [package]
-name = "pgsandbox-mcp"
+name = "pgsandbox"
 version = "0.4.7"
 edition = "2021"
-description = "MCP server for disposable Postgres sandboxes."
+description = "CLI and MCP server for disposable Postgres sandboxes."
 license = "MIT"
-repository = "https://github.com/LVTD-LLC/pgsandbox-mcp"
+repository = "https://github.com/LVTD-LLC/pgsandbox"
 
 [dependencies]
 anyhow = "1.0"
@@ -34,7 +34,7 @@ uuid = { version = "1.18", features = ["v4", "serde"] }
 tempfile = "3.23"
 
 [[bin]]
-name = "pgsandbox-mcp"
+name = "pgsandbox"
 path = "rust-src/main.rs"
 
 [lib]

@@ -1,4 +1,4 @@
-# PGSandbox MCP Vision
+# PGSandbox Vision
 
 ## Durable Direction
 

@@ -65,7 +65,7 @@ const MAX_WORKFLOW_COMMAND_TOTAL_BYTES: usize = 2_048;
 const MAX_WORKFLOW_COMMAND_PART_BYTES: usize = 256;
 const MAX_PROFILE_HINTS: usize = 20;
 const TEMPLATE_PRIVACY_WARNING: &str =
-    "Templates are local PG Sandbox artifacts. Do not create templates from production or sensitive data unless you have explicitly sanitized it.";
+    "Templates are local PGSandbox artifacts. Do not create templates from production or sensitive data unless you have explicitly sanitized it.";
 const UNSUPPORTED_TYPE_CAST_HINT: &str =
     "Cast this expression to text in SQL to render its display value, for example `expression::text`.";
 const DIRECT_CONNECTION_USAGE: &str =
@@ -2881,7 +2881,7 @@ impl PostgresSandboxManager {
         let warnings = output.action_needed.iter().cloned().collect::<Vec<_>>();
 
         Ok(workflow_success(
-            "Repository prepared for PG Sandbox workflows.",
+            "Repository prepared for PGSandbox workflows.",
             None,
             warnings,
             vec![json!({
@@ -3762,7 +3762,7 @@ fn unknown_postgres_version_error(config: &SandboxConfig, version: &str) -> anyh
         .unwrap_or_else(|| config.default_profile.clone());
 
     anyhow::anyhow!(
-        "No configured profile advertises postgresVersion {version}. The active default profile is {profile_summary}. To use managed local version discovery, rerun `pgsandbox-mcp setup --client <client>` without --admin-url, restart the MCP client, and retry. Or add an explicit profile with postgresVersion {version}."
+        "No configured profile advertises postgresVersion {version}. The active default profile is {profile_summary}. To use managed local version discovery, rerun `pgsandbox setup --client <client>` without --admin-url, restart the MCP client, and retry. Or add an explicit profile with postgresVersion {version}."
     )
 }
 
@@ -3770,7 +3770,7 @@ fn list_profile_hints(config: &SandboxConfig) -> Vec<String> {
     let mut hints = vec![restart_required_after_setup_note()];
     if !config.managed_local.enabled {
         hints.push(
-            "This server is using explicit configured Postgres profile(s), not managed local version discovery. If this was accidental or stale, rerun `pgsandbox-mcp setup --client <client>` without --admin-url and restart the MCP client.".to_string(),
+            "This server is using explicit configured Postgres profile(s), not managed local version discovery. If this was accidental or stale, rerun `pgsandbox setup --client <client>` without --admin-url and restart the MCP client.".to_string(),
         );
     }
     hints
@@ -3778,7 +3778,7 @@ fn list_profile_hints(config: &SandboxConfig) -> Vec<String> {
 
 fn restart_required_after_setup_note() -> String {
     format!(
-        "MCP clients cache tool metadata. After setup or upgrade, restart the MCP client and verify pgsandbox-mcp reports {} tools.",
+        "MCP clients cache tool metadata. After setup or upgrade, restart the MCP client and verify pgsandbox reports {} tools.",
         PUBLIC_MCP_TOOL_COUNT
     )
 }
@@ -7521,7 +7521,7 @@ fn unprotect_role_password(value: &str, profile: &SandboxProfile) -> anyhow::Res
 
 fn role_password_cipher(profile: &SandboxProfile) -> anyhow::Result<Aes256Gcm> {
     let mut hasher = Sha256::new();
-    hasher.update(b"pgsandbox-mcp sandbox role password v1\0");
+    hasher.update(b"pgsandbox sandbox role password v1\0");
     hasher.update(profile.admin_url.as_bytes());
     let key = hasher.finalize();
     Aes256Gcm::new_from_slice(&key)

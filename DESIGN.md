@@ -1,4 +1,4 @@
-# PGSandbox MCP Design Steering
+# PGSandbox Design Steering
 
 ## Scope
 

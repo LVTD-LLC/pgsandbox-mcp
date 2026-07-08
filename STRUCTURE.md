@@ -1,4 +1,4 @@
-# PGSandbox MCP Repository Structure
+# PGSandbox Repository Structure
 
 ## Top-Level Map
 

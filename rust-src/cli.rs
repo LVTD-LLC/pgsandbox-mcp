@@ -1,12 +1,15 @@
 use std::{
     collections::BTreeMap,
     env, fs,
+    io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context;
+use serde::Serialize;
+use serde_json::{Map, Value};
 
 use crate::{
     config::{load_config, load_config_deferred_local, load_config_from_env},
@@ -15,10 +18,15 @@ use crate::{
         local_postgres_install_plan, LocalClusterConfig, LocalClusterStatus, LocalPostgresCluster,
         LocalPostgresEnsureResult,
     },
-    mcp::serve_stdio,
+    mcp::{serve_stdio, tool_result_payload},
     postgres::{
-        CreateDatabaseInput, DatabaseSelector, ListExtensionsInput, PostgresSandboxManager,
-        RunSqlInput,
+        CleanupExpiredInput, CloneDatabaseInput, ConnectionStringInput, CreateDatabaseInput,
+        CreateSandboxFromTemplateInput, CreateSchemaSnapshotInput, CreateTemplateFromSandboxInput,
+        DatabaseSelector, DeleteSchemaSnapshotInput, DeleteTemplateInput, DescribeSchemaInput,
+        DiffSchemaSnapshotInput, ExplainQueryInput, ListDatabasesInput, ListExtensionsInput,
+        ListProfilesInput, ListSchemaSnapshotsInput, ListTemplatesInput, PostgresSandboxManager,
+        PrepareForRepoInput, RunRepoCommandInput, RunSqlInput, SchemaDiffInput, SeedDatabaseInput,
+        ValidateSchemaChangeInput,
     },
     setup::{
         build_launch_config, config_snippet, parse_client, parse_scope, resolve_targets,
@@ -32,10 +40,10 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<u8> {
     let (command, rest) = args
         .split_first()
         .map(|(command, rest)| (command.as_str(), rest.to_vec()))
-        .unwrap_or(("stdio", Vec::new()));
+        .unwrap_or(("mcp", Vec::new()));
 
     match command {
-        "stdio" => start_server().await.map(|()| 0),
+        "mcp" | "stdio" => start_server().await.map(|()| 0),
         "--help" | "-h" | "help" => {
             print_help();
             Ok(0)
@@ -73,19 +81,718 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<u8> {
             Ok(0)
         }
         "setup" => setup(&rest).await,
+        "tool" => cli_tool_from_tool_subcommand(&rest).await,
+        "doctor" if uses_tool_json_mode(&rest) => cli_tool(command, &rest).await,
         "doctor" => doctor(&rest).await,
+        "list-extensions" if uses_tool_json_mode(&rest) => cli_tool(command, &rest).await,
         "list-extensions" => list_extensions(&rest).await,
+        "ensure-postgres" if uses_tool_json_mode(&rest) => cli_tool(command, &rest).await,
         "ensure-postgres" => ensure_postgres(&rest).await,
         "upgrade" => upgrade(&rest).await,
         "local" => local(&rest).await,
         "smoke-test" => smoke_test(&rest).await,
         "" => start_server().await.map(|()| 0),
+        other if find_cli_tool_command(other).is_some() => cli_tool(other, &rest).await,
         other => anyhow::bail!("Unknown command: {other}"),
     }
 }
 
 async fn start_server() -> anyhow::Result<()> {
     serve_stdio(load_config_deferred_local()?).await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CliToolCommand {
+    command_name: &'static str,
+    tool_name: &'static str,
+}
+
+const CLI_TOOL_COMMANDS: &[CliToolCommand] = &[
+    CliToolCommand {
+        command_name: "list-profiles",
+        tool_name: "list_profiles",
+    },
+    CliToolCommand {
+        command_name: "ensure-postgres",
+        tool_name: "ensure_postgres",
+    },
+    CliToolCommand {
+        command_name: "list-extensions",
+        tool_name: "list_extensions",
+    },
+    CliToolCommand {
+        command_name: "create-database",
+        tool_name: "create_database",
+    },
+    CliToolCommand {
+        command_name: "clone-database",
+        tool_name: "clone_database",
+    },
+    CliToolCommand {
+        command_name: "delete-database",
+        tool_name: "delete_database",
+    },
+    CliToolCommand {
+        command_name: "get-connection-string",
+        tool_name: "get_connection_string",
+    },
+    CliToolCommand {
+        command_name: "run-sql",
+        tool_name: "run_sql",
+    },
+    CliToolCommand {
+        command_name: "describe-schema",
+        tool_name: "describe_schema",
+    },
+    CliToolCommand {
+        command_name: "schema-digest",
+        tool_name: "schema_digest",
+    },
+    CliToolCommand {
+        command_name: "schema-diff",
+        tool_name: "schema_diff",
+    },
+    CliToolCommand {
+        command_name: "explain-query",
+        tool_name: "explain_query",
+    },
+    CliToolCommand {
+        command_name: "create-schema-snapshot",
+        tool_name: "create_schema_snapshot",
+    },
+    CliToolCommand {
+        command_name: "list-schema-snapshots",
+        tool_name: "list_schema_snapshots",
+    },
+    CliToolCommand {
+        command_name: "delete-schema-snapshot",
+        tool_name: "delete_schema_snapshot",
+    },
+    CliToolCommand {
+        command_name: "diff-schema-snapshot",
+        tool_name: "diff_schema_snapshot",
+    },
+    CliToolCommand {
+        command_name: "prepare-for-repo",
+        tool_name: "prepare_for_repo",
+    },
+    CliToolCommand {
+        command_name: "run-repo-command",
+        tool_name: "run_repo_command",
+    },
+    CliToolCommand {
+        command_name: "validate-schema-change",
+        tool_name: "validate_schema_change",
+    },
+    CliToolCommand {
+        command_name: "seed-database",
+        tool_name: "seed_database",
+    },
+    CliToolCommand {
+        command_name: "create-template-from-sandbox",
+        tool_name: "create_template_from_sandbox",
+    },
+    CliToolCommand {
+        command_name: "create-sandbox-from-template",
+        tool_name: "create_sandbox_from_template",
+    },
+    CliToolCommand {
+        command_name: "list-templates",
+        tool_name: "list_templates",
+    },
+    CliToolCommand {
+        command_name: "delete-template",
+        tool_name: "delete_template",
+    },
+    CliToolCommand {
+        command_name: "list-databases",
+        tool_name: "list_databases",
+    },
+    CliToolCommand {
+        command_name: "cleanup-expired",
+        tool_name: "cleanup_expired",
+    },
+    CliToolCommand {
+        command_name: "doctor",
+        tool_name: "doctor",
+    },
+];
+
+#[derive(Debug, Clone, PartialEq)]
+struct CliToolInvocation {
+    tool_name: &'static str,
+    input: Value,
+    admin_url: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct CliEnsurePostgresInput {
+    postgres_version: Option<String>,
+    install_missing: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliEnsurePostgresOutput {
+    server_version: String,
+    profile_name: String,
+    postgres_version: Option<String>,
+    install_missing: bool,
+    install_method: Option<String>,
+    installed_package: Option<String>,
+    port: u16,
+    data_dir: PathBuf,
+    socket_dir: PathBuf,
+    config_path: PathBuf,
+    admin_url_redacted: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct CliDoctorInput {
+    postgres_version: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CliDoctorOutput {
+    ok: bool,
+    server_version: String,
+    tool_count: usize,
+    available_postgres_versions: Vec<String>,
+    lines: Vec<String>,
+}
+
+async fn cli_tool_from_tool_subcommand(args: &[String]) -> anyhow::Result<u8> {
+    let (tool, rest) = args
+        .split_first()
+        .map(|(tool, rest)| (tool.as_str(), rest))
+        .context("Missing tool name. Use `pgsandbox tool <tool-name> --input '{...}'`.")?;
+    cli_tool(tool, rest).await
+}
+
+async fn cli_tool(command: &str, args: &[String]) -> anyhow::Result<u8> {
+    if has_help_flag(args) {
+        print_tool_help(command);
+        return Ok(0);
+    }
+
+    let invocation = parse_cli_tool_invocation(command, args)?;
+    let (ok, payload) = execute_cli_tool(invocation).await?;
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(if ok { 0 } else { 1 })
+}
+
+async fn execute_cli_tool(invocation: CliToolInvocation) -> anyhow::Result<(bool, Value)> {
+    match invocation.tool_name {
+        "ensure_postgres" => {
+            let input = cli_input::<CliEnsurePostgresInput>(invocation.input)?;
+            tool_result_payload(
+                async move {
+                    let install_missing = input.install_missing.unwrap_or(true);
+                    let cluster = LocalPostgresCluster::from_env_for_version(
+                        input.postgres_version.as_deref(),
+                    )?;
+                    let result = cluster
+                        .ensure_started_with_optional_install(install_missing)
+                        .with_context(|| match input.postgres_version.as_deref() {
+                            Some(version) => format!("failed to ensure local Postgres {version}"),
+                            None => "failed to ensure default local Postgres".to_string(),
+                        })?;
+                    anyhow::Ok(CliEnsurePostgresOutput {
+                        server_version: VERSION.to_string(),
+                        profile_name: result.config.profile_name,
+                        postgres_version: result.config.postgres_version,
+                        install_missing,
+                        install_method: result.install_method,
+                        installed_package: result.installed_package,
+                        port: result.config.port,
+                        data_dir: result.config.data_dir,
+                        socket_dir: result.config.socket_dir,
+                        config_path: cluster.config_path(),
+                        admin_url_redacted: mask_connection_string(&result.config.admin_url),
+                    })
+                }
+                .await,
+            )
+        }
+        "doctor" => {
+            let input = cli_input::<CliDoctorInput>(invocation.input)?;
+            let admin_url = invocation.admin_url;
+            tool_result_payload(
+                async move {
+                    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                    let result = run_doctor(
+                        admin_url.as_deref(),
+                        input.postgres_version.as_deref(),
+                        &cwd,
+                    )
+                    .await;
+                    anyhow::Ok(CliDoctorOutput {
+                        ok: result.ok,
+                        server_version: VERSION.to_string(),
+                        tool_count: crate::mcp::PUBLIC_MCP_TOOL_COUNT,
+                        available_postgres_versions: result.available_postgres_versions,
+                        lines: result.lines,
+                    })
+                }
+                .await,
+            )
+        }
+        tool_name => {
+            let config = cli_tool_config(invocation.admin_url.as_deref())?;
+            let manager = PostgresSandboxManager::new(config);
+            match tool_name {
+                "list_profiles" => {
+                    cli_manager_result(
+                        manager.list_profiles(cli_input::<ListProfilesInput>(invocation.input)?),
+                    )
+                }
+                "list_extensions" => cli_manager_result(
+                    manager
+                        .list_extensions(cli_input::<ListExtensionsInput>(invocation.input)?)
+                        .await,
+                ),
+                "create_database" => cli_manager_result(
+                    manager
+                        .create_database(cli_input::<CreateDatabaseInput>(invocation.input)?)
+                        .await,
+                ),
+                "clone_database" => cli_manager_result(
+                    manager
+                        .clone_database(cli_input::<CloneDatabaseInput>(invocation.input)?)
+                        .await,
+                ),
+                "delete_database" => cli_manager_result(
+                    manager
+                        .delete_database(cli_input::<DatabaseSelector>(invocation.input)?)
+                        .await,
+                ),
+                "get_connection_string" => {
+                    let input = cli_input::<ConnectionStringInput>(invocation.input)?;
+                    let include_credentials = input.include_credentials.unwrap_or(false);
+                    cli_manager_result(
+                        manager
+                            .get_connection_string(DatabaseSelector::from(&input))
+                            .await
+                            .map(|output| output.with_credentials_in_response(include_credentials)),
+                    )
+                }
+                "run_sql" => cli_manager_result(
+                    manager
+                        .run_sql(cli_input::<RunSqlInput>(invocation.input)?)
+                        .await,
+                ),
+                "describe_schema" => cli_manager_result(
+                    manager
+                        .describe_schema(cli_input::<DescribeSchemaInput>(invocation.input)?)
+                        .await,
+                ),
+                "schema_digest" => cli_manager_result(
+                    manager
+                        .schema_digest(cli_input::<DatabaseSelector>(invocation.input)?)
+                        .await,
+                ),
+                "schema_diff" => cli_manager_result(
+                    manager
+                        .schema_diff(cli_input::<SchemaDiffInput>(invocation.input)?)
+                        .await,
+                ),
+                "explain_query" => cli_manager_result(
+                    manager
+                        .explain_query(cli_input::<ExplainQueryInput>(invocation.input)?)
+                        .await,
+                ),
+                "create_schema_snapshot" => cli_manager_result(
+                    manager
+                        .create_schema_snapshot(cli_input::<CreateSchemaSnapshotInput>(
+                            invocation.input,
+                        )?)
+                        .await,
+                ),
+                "list_schema_snapshots" => cli_manager_result(
+                    manager
+                        .list_schema_snapshots(cli_input::<ListSchemaSnapshotsInput>(
+                            invocation.input,
+                        )?)
+                        .await,
+                ),
+                "delete_schema_snapshot" => cli_manager_result(
+                    manager
+                        .delete_schema_snapshot(cli_input::<DeleteSchemaSnapshotInput>(
+                            invocation.input,
+                        )?)
+                        .await,
+                ),
+                "diff_schema_snapshot" => cli_manager_result(
+                    manager
+                        .diff_schema_snapshot(cli_input::<DiffSchemaSnapshotInput>(
+                            invocation.input,
+                        )?)
+                        .await,
+                ),
+                "prepare_for_repo" => cli_manager_result(
+                    manager
+                        .prepare_for_repo(cli_input::<PrepareForRepoInput>(invocation.input)?)
+                        .await,
+                ),
+                "run_repo_command" => cli_manager_result(
+                    manager
+                        .run_repo_command(cli_input::<RunRepoCommandInput>(invocation.input)?)
+                        .await,
+                ),
+                "validate_schema_change" => cli_manager_result(
+                    manager
+                        .validate_schema_change(cli_input::<ValidateSchemaChangeInput>(
+                            invocation.input,
+                        )?)
+                        .await,
+                ),
+                "seed_database" => cli_manager_result(
+                    manager
+                        .seed_database(cli_input::<SeedDatabaseInput>(invocation.input)?)
+                        .await,
+                ),
+                "create_template_from_sandbox" => cli_manager_result(
+                    manager
+                        .create_template_from_sandbox(cli_input::<CreateTemplateFromSandboxInput>(
+                            invocation.input,
+                        )?)
+                        .await,
+                ),
+                "create_sandbox_from_template" => cli_manager_result(
+                    manager
+                        .create_sandbox_from_template(cli_input::<CreateSandboxFromTemplateInput>(
+                            invocation.input,
+                        )?)
+                        .await,
+                ),
+                "list_templates" => cli_manager_result(
+                    manager
+                        .list_templates(cli_input::<ListTemplatesInput>(invocation.input)?)
+                        .await,
+                ),
+                "delete_template" => cli_manager_result(
+                    manager
+                        .delete_template(cli_input::<DeleteTemplateInput>(invocation.input)?)
+                        .await,
+                ),
+                "list_databases" => cli_manager_result(
+                    manager
+                        .list_databases(cli_input::<ListDatabasesInput>(invocation.input)?)
+                        .await,
+                ),
+                "cleanup_expired" => cli_manager_result(
+                    manager
+                        .cleanup_expired(cli_input::<CleanupExpiredInput>(invocation.input)?)
+                        .await,
+                ),
+                other => anyhow::bail!("Unsupported CLI tool command: {other}"),
+            }
+        }
+    }
+}
+
+fn cli_manager_result<T: Serialize>(result: anyhow::Result<T>) -> anyhow::Result<(bool, Value)> {
+    tool_result_payload(result)
+}
+
+fn cli_input<T>(input: Value) -> anyhow::Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_value(input).context("failed to parse CLI tool input")
+}
+
+fn cli_tool_config(admin_url: Option<&str>) -> anyhow::Result<crate::config::SandboxConfig> {
+    if let Some(admin_url) = admin_url {
+        let mut env = std::env::vars().collect::<Vec<_>>();
+        env.push((
+            "PGSANDBOX_ADMIN_DATABASE_URL".to_string(),
+            admin_url.to_string(),
+        ));
+        return Ok(load_config_from_env(env)?);
+    }
+    Ok(load_config_deferred_local()?)
+}
+
+fn parse_cli_tool_invocation(command: &str, args: &[String]) -> anyhow::Result<CliToolInvocation> {
+    let command = find_cli_tool_command(command)
+        .with_context(|| format!("Unknown PGSandbox tool command: {command}"))?;
+    let mut input = Map::new();
+    let mut admin_url = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = &args[index];
+        match arg.as_str() {
+            "--json" => {
+                index += 1;
+            }
+            "--input" => {
+                let raw = next_value(args, index + 1, arg)?;
+                merge_input_object(&mut input, parse_json_object(raw)?)?;
+                index += 2;
+            }
+            "--input-file" => {
+                let path = next_value(args, index + 1, arg)?;
+                let raw = read_input_file(path)?;
+                merge_input_object(&mut input, parse_json_object(&raw)?)?;
+                index += 2;
+            }
+            "--admin-url" => {
+                admin_url = Some(next_value(args, index + 1, arg)?.to_string());
+                index += 2;
+            }
+            "--readonly"
+            | "--include-credentials"
+            | "--include-all-versions"
+            | "--dry-run"
+            | "--schema-only"
+            | "--include-discovered-local"
+            | "--install-missing" => {
+                set_input_field(&mut input, flag_to_field(arg), Value::Bool(true));
+                index += 1;
+            }
+            "--no-install" => {
+                set_input_field(&mut input, "installMissing", Value::Bool(false));
+                index += 1;
+            }
+            "--label" => {
+                let raw = next_value(args, index + 1, arg)?;
+                add_label(&mut input, raw)?;
+                index += 2;
+            }
+            "--extension" => {
+                push_array_field(
+                    &mut input,
+                    "extensions",
+                    Value::String(next_value(args, index + 1, arg)?.to_string()),
+                )?;
+                index += 2;
+            }
+            "--exclude-source-extension" => {
+                push_array_field(
+                    &mut input,
+                    "excludeSourceExtensions",
+                    Value::String(next_value(args, index + 1, arg)?.to_string()),
+                )?;
+                index += 2;
+            }
+            "--command" | "--migration-command" | "--seed-command" => {
+                let field = flag_to_field(arg);
+                let value = next_value(args, index + 1, arg)?;
+                add_command_field(&mut input, field, value)?;
+                index += 2;
+            }
+            "--set" => {
+                let raw = next_value(args, index + 1, arg)?;
+                let (field, value) = raw
+                    .split_once('=')
+                    .with_context(|| format!("{arg} expects field=value"))?;
+                set_input_field(
+                    &mut input,
+                    option_name_to_field(field),
+                    parse_scalar_value(value),
+                );
+                index += 2;
+            }
+            "--set-json" => {
+                let raw = next_value(args, index + 1, arg)?;
+                let (field, value) = raw
+                    .split_once('=')
+                    .with_context(|| format!("{arg} expects field=json"))?;
+                let value = serde_json::from_str(value)
+                    .with_context(|| format!("failed to parse JSON value for {field}"))?;
+                set_input_field(&mut input, option_name_to_field(field), value);
+                index += 2;
+            }
+            "--" => {
+                let command = args[index + 1..]
+                    .iter()
+                    .map(|part| Value::String(part.clone()))
+                    .collect::<Vec<_>>();
+                set_input_field(&mut input, "command", Value::Array(command));
+                index = args.len();
+            }
+            _ if arg.starts_with("--") => {
+                let raw = &arg[2..];
+                if let Some((name, value)) = raw.split_once('=') {
+                    set_input_field(
+                        &mut input,
+                        option_name_to_field(name),
+                        parse_scalar_value(value),
+                    );
+                    index += 1;
+                } else {
+                    let value = next_value(args, index + 1, arg)?;
+                    set_input_field(
+                        &mut input,
+                        option_name_to_field(raw),
+                        parse_scalar_value(value),
+                    );
+                    index += 2;
+                }
+            }
+            _ => anyhow::bail!("Unexpected argument for {}: {arg}", command.command_name),
+        }
+    }
+
+    Ok(CliToolInvocation {
+        tool_name: command.tool_name,
+        input: Value::Object(input),
+        admin_url,
+    })
+}
+
+fn find_cli_tool_command(command: &str) -> Option<&'static CliToolCommand> {
+    CLI_TOOL_COMMANDS
+        .iter()
+        .find(|candidate| candidate.command_name == command || candidate.tool_name == command)
+}
+
+fn uses_tool_json_mode(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--json" | "--input" | "--input-file" | "--set" | "--set-json"
+        )
+    })
+}
+
+fn merge_input_object(target: &mut Map<String, Value>, value: Value) -> anyhow::Result<()> {
+    let Value::Object(object) = value else {
+        anyhow::bail!("CLI tool input must be a JSON object");
+    };
+    for (key, value) in object {
+        target.insert(key, value);
+    }
+    Ok(())
+}
+
+fn parse_json_object(raw: &str) -> anyhow::Result<Value> {
+    serde_json::from_str(raw).context("failed to parse JSON input")
+}
+
+fn read_input_file(path: &str) -> anyhow::Result<String> {
+    if path == "-" {
+        let mut input = String::new();
+        std::io::stdin()
+            .read_to_string(&mut input)
+            .context("failed to read JSON input from stdin")?;
+        return Ok(input);
+    }
+    fs::read_to_string(path).with_context(|| format!("failed to read JSON input file {path}"))
+}
+
+fn flag_to_field(flag: &str) -> &'static str {
+    match flag {
+        "--readonly" => "readonly",
+        "--include-credentials" => "includeCredentials",
+        "--include-all-versions" => "includeAllVersions",
+        "--dry-run" => "dryRun",
+        "--schema-only" => "schemaOnly",
+        "--include-discovered-local" => "includeDiscoveredLocal",
+        "--install-missing" => "installMissing",
+        "--command" => "command",
+        "--migration-command" => "migrationCommand",
+        "--seed-command" => "seedCommand",
+        _ => unreachable!("unsupported flag {flag}"),
+    }
+}
+
+fn option_name_to_field(name: &str) -> String {
+    let mut field = String::new();
+    let mut uppercase_next = false;
+
+    for character in name.chars() {
+        if character == '-' || character == '_' {
+            uppercase_next = true;
+            continue;
+        }
+
+        if uppercase_next {
+            field.extend(character.to_uppercase());
+            uppercase_next = false;
+        } else {
+            field.push(character);
+        }
+    }
+
+    field
+}
+
+fn set_input_field(target: &mut Map<String, Value>, field: impl Into<String>, value: Value) {
+    target.insert(field.into(), value);
+}
+
+fn push_array_field(
+    target: &mut Map<String, Value>,
+    field: &'static str,
+    value: Value,
+) -> anyhow::Result<()> {
+    match target
+        .entry(field.to_string())
+        .or_insert_with(|| Value::Array(Vec::new()))
+    {
+        Value::Array(values) => {
+            values.push(value);
+            Ok(())
+        }
+        _ => anyhow::bail!("{field} must be an array"),
+    }
+}
+
+fn add_label(target: &mut Map<String, Value>, raw: &str) -> anyhow::Result<()> {
+    let (key, value) = raw
+        .split_once('=')
+        .with_context(|| "--label expects key=value")?;
+    match target
+        .entry("labels".to_string())
+        .or_insert_with(|| Value::Object(Map::new()))
+    {
+        Value::Object(labels) => {
+            labels.insert(key.to_string(), parse_scalar_value(value));
+            Ok(())
+        }
+        _ => anyhow::bail!("labels must be an object"),
+    }
+}
+
+fn add_command_field(
+    target: &mut Map<String, Value>,
+    field: &'static str,
+    value: &str,
+) -> anyhow::Result<()> {
+    if value.trim_start().starts_with('[') {
+        let parsed = serde_json::from_str::<Vec<String>>(value)
+            .with_context(|| format!("{field} JSON value must be an array of strings"))?;
+        set_input_field(
+            target,
+            field,
+            Value::Array(parsed.into_iter().map(Value::String).collect()),
+        );
+        return Ok(());
+    }
+
+    push_array_field(target, field, Value::String(value.to_string()))
+}
+
+fn parse_scalar_value(value: &str) -> Value {
+    serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.to_string()))
+}
+
+fn print_tool_help(command: &str) {
+    let Some(command) = find_cli_tool_command(command) else {
+        print_help();
+        return;
+    };
+    println!(
+        "Usage:\n  pgsandbox {name} --input '{{...}}'\n  pgsandbox {name} --input-file input.json\n  pgsandbox tool {tool} --input '{{...}}'\n\nCommon flags:\n  --profile <profile>\n  --postgres-version <major>\n  --database-id <id>\n  --database-name <name>\n  --json\n  --set field=value\n  --set-json field=json\n  --label key=value\n  --command <arg> [--command <arg>...]\n  -- --command-arg ...",
+        name = command.command_name,
+        tool = command.tool_name,
+    );
 }
 
 async fn setup(args: &[String]) -> anyhow::Result<u8> {
@@ -129,7 +836,7 @@ async fn setup(args: &[String]) -> anyhow::Result<u8> {
         }
     }
 
-    println!("Next: restart the MCP client, then run `pgsandbox-mcp doctor`.");
+    println!("Next: restart the MCP client, then run `pgsandbox doctor`.");
     telemetry
         .capture(
             crate::telemetry::EVENT_CLI_COMMAND_COMPLETED,
@@ -339,7 +1046,7 @@ async fn upgrade(args: &[String]) -> anyhow::Result<u8> {
         }
         UpgradeInstallSource::Cargo => {
             anyhow::bail!(
-                "`pgsandbox-mcp upgrade` does not replace Cargo or source builds. Reinstall with `cargo install --git https://github.com/LVTD-LLC/pgsandbox-mcp --tag v{VERSION} --force`, or use Homebrew/the GitHub install script for managed upgrades."
+                "`pgsandbox upgrade` does not replace Cargo or source builds. Reinstall with `cargo install --git https://github.com/LVTD-LLC/pgsandbox --tag v{VERSION} --force`, or use Homebrew/the GitHub install script for managed upgrades."
             );
         }
     }
@@ -841,7 +1548,7 @@ fn detect_upgrade_plan(current_exe: &Path) -> UpgradePlan {
         let command = if homebrew_bin.exists() {
             homebrew_bin
         } else {
-            PathBuf::from("pgsandbox-mcp")
+            PathBuf::from("pgsandbox")
         };
         return UpgradePlan {
             source: UpgradeInstallSource::Homebrew,
@@ -867,7 +1574,7 @@ fn detect_upgrade_plan(current_exe: &Path) -> UpgradePlan {
 
 fn homebrew_bin_path_if_managed(current_exe: &Path) -> Option<PathBuf> {
     let current = canonical_or_original(current_exe);
-    let formula_prefixes = ["LVTD-LLC/tap/pgsandbox-mcp", "pgsandbox-mcp"]
+    let formula_prefixes = ["LVTD-LLC/tap/pgsandbox", "pgsandbox"]
         .into_iter()
         .filter_map(homebrew_prefix_for);
 
@@ -887,8 +1594,8 @@ fn homebrew_prefix_for(formula: &str) -> Option<PathBuf> {
 
 fn homebrew_global_bin_path() -> PathBuf {
     command_output_trim("brew", &["--prefix"])
-        .map(|prefix| PathBuf::from(prefix).join("bin").join("pgsandbox-mcp"))
-        .unwrap_or_else(|| PathBuf::from("pgsandbox-mcp"))
+        .map(|prefix| PathBuf::from(prefix).join("bin").join("pgsandbox"))
+        .unwrap_or_else(|| PathBuf::from("pgsandbox"))
 }
 
 fn command_output_trim(command: &str, args: &[&str]) -> Option<String> {
@@ -917,23 +1624,23 @@ fn path_has_homebrew_cellar_pgsandbox(path: &Path) -> bool {
 
     components
         .windows(2)
-        .any(|window| window[0] == "Cellar" && window[1] == "pgsandbox-mcp")
+        .any(|window| window[0] == "Cellar" && window[1] == "pgsandbox")
 }
 
 fn path_looks_like_cargo_or_source_build(path: &Path) -> bool {
     let text = path.to_string_lossy();
-    text.contains("/.cargo/bin/pgsandbox-mcp")
-        || text.contains("\\.cargo\\bin\\pgsandbox-mcp")
-        || text.contains("/target/debug/pgsandbox-mcp")
-        || text.contains("/target/release/pgsandbox-mcp")
-        || text.contains("\\target\\debug\\pgsandbox-mcp")
-        || text.contains("\\target\\release\\pgsandbox-mcp")
+    text.contains("/.cargo/bin/pgsandbox")
+        || text.contains("\\.cargo\\bin\\pgsandbox")
+        || text.contains("/target/debug/pgsandbox")
+        || text.contains("/target/release/pgsandbox")
+        || text.contains("\\target\\debug\\pgsandbox")
+        || text.contains("\\target\\release\\pgsandbox")
 }
 
 fn run_homebrew_upgrade(dry_run: bool) -> anyhow::Result<()> {
     println!("Upgrade source: Homebrew");
     run_status_command("brew", &["update"], dry_run)?;
-    run_status_command("brew", &["upgrade", "LVTD-LLC/tap/pgsandbox-mcp"], dry_run)
+    run_status_command("brew", &["upgrade", "LVTD-LLC/tap/pgsandbox"], dry_run)
 }
 
 fn ensure_homebrew_upgrade_options(options: &BTreeMap<String, String>) -> anyhow::Result<()> {
@@ -963,7 +1670,7 @@ async fn run_github_installer_upgrade(
         .cloned()
         .or_else(|| env::var("PGSANDBOX_INSTALL_SCRIPT_URL").ok())
         .unwrap_or_else(|| {
-            "https://raw.githubusercontent.com/LVTD-LLC/pgsandbox-mcp/main/scripts/install.sh"
+            "https://raw.githubusercontent.com/LVTD-LLC/pgsandbox/main/scripts/install.sh"
                 .to_string()
         });
 
@@ -1010,7 +1717,7 @@ fn ensure_github_installer_supported() -> anyhow::Result<()> {
     match env::consts::OS {
         "macos" | "linux" => Ok(()),
         other => anyhow::bail!(
-            "`pgsandbox-mcp upgrade` supports the GitHub release installer on macOS and Linux. {other} needs a platform-specific release installer before self-upgrade can be supported."
+            "`pgsandbox upgrade` supports the GitHub release installer on macOS and Linux. {other} needs a platform-specific release installer before self-upgrade can be supported."
         ),
     }
 }
@@ -1021,7 +1728,7 @@ fn temp_upgrade_script_path() -> PathBuf {
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
     env::temp_dir().join(format!(
-        "pgsandbox-mcp-install-{}-{timestamp}.sh",
+        "pgsandbox-install-{}-{timestamp}.sh",
         std::process::id()
     ))
 }
@@ -1212,7 +1919,7 @@ fn print_local_status(status: &LocalClusterStatus, cluster: &LocalPostgresCluste
     if !status.initialized {
         println!("Local Postgres: not initialized");
         println!("Root: {}", cluster.root().display());
-        println!("Next: pgsandbox-mcp local start");
+        println!("Next: pgsandbox local start");
         return;
     }
 
@@ -1273,21 +1980,29 @@ fn print_help() {
 
 fn help_text() -> String {
     format!(
-        r#"pgsandbox-mcp {VERSION}
+        r#"pgsandbox {VERSION}
 
 Usage:
-  pgsandbox-mcp                      Start the MCP server over stdio
-  pgsandbox-mcp stdio                Start the MCP server over stdio
-  pgsandbox-mcp setup [options]      Check and start managed local Postgres, then write MCP client config
-  pgsandbox-mcp doctor [options]     Check config and Postgres connectivity
-  pgsandbox-mcp list-extensions [options] List available profile extensions and installed sandbox extensions
-  pgsandbox-mcp ensure-postgres      Install missing Postgres binaries when possible, then start managed local Postgres
-  pgsandbox-mcp upgrade [options]    Upgrade the binary, then run setup all and doctor
-  pgsandbox-mcp local init [options] Initialize the managed local Postgres cluster
-  pgsandbox-mcp local start [options] Start the managed local Postgres cluster
-  pgsandbox-mcp local stop [options] Stop the managed local Postgres cluster
-  pgsandbox-mcp local status [options] Show managed local Postgres status
-  pgsandbox-mcp smoke-test [options] Create, query, and delete a sandbox
+  pgsandbox                          Start the MCP server over stdio
+  pgsandbox mcp                      Start the MCP server over stdio
+  pgsandbox setup [options]          Check and start managed local Postgres, then write MCP client config
+  pgsandbox doctor [options]         Check config and Postgres connectivity
+  pgsandbox doctor --json            Return doctor output as the tool JSON envelope
+  pgsandbox ensure-postgres          Install missing Postgres binaries when possible, then start managed local Postgres
+  pgsandbox list-extensions [options] List available profile extensions and installed sandbox extensions
+  pgsandbox local init [options]     Initialize the managed local Postgres cluster
+  pgsandbox local start [options]    Start the managed local Postgres cluster
+  pgsandbox local stop [options]     Stop the managed local Postgres cluster
+  pgsandbox local status [options]   Show managed local Postgres status
+  pgsandbox smoke-test [options]     Create, query, and delete a sandbox
+  pgsandbox upgrade [options]        Upgrade the binary, then run setup all and doctor
+
+Sandbox CLI tool commands:
+  pgsandbox create-database --name-hint <text> --ttl-minutes <minutes>
+  pgsandbox run-sql --database-id <id> --sql <sql> [--readonly]
+  pgsandbox delete-database --database-id <id>
+  pgsandbox tool <mcp_tool_name> --input '{{...}}'
+  pgsandbox <tool-command> --input-file input.json
 
 Setup options:
   --client <client>                  codex, cursor, vscode, claude-desktop, all
@@ -1309,6 +2024,16 @@ Extension discovery options:
   --database-id <id>                  Include installed extensions for a sandbox id
   --database-name <name>              Include installed extensions for a sandbox name
   --admin-url <url>                   Temporary admin Postgres URL for this command
+
+Tool JSON options:
+  --input <json>                      Merge a camelCase JSON object into the tool input
+  --input-file <path|- >              Read a camelCase JSON object from a file or stdin
+  --json                              Use the structured tool JSON envelope for commands with human output
+  --set field=value                   Set any tool input field; values parse as JSON when possible
+  --set-json field=json               Set any tool input field to a JSON value
+  --label key=value                   Add a label filter or create label
+  --command <arg>                     Add one argv part; repeat or pass a JSON array
+  -- --command-arg ...                Set command to the remaining argv
 
 Local options:
   --postgres-version <major>          Managed local Postgres version, for example 13
@@ -1366,17 +2091,79 @@ mod tests {
     fn help_text_lists_local_runtime_commands() {
         let help = help_text();
 
-        assert!(help.contains("pgsandbox-mcp local init"));
-        assert!(help.contains("pgsandbox-mcp local start"));
-        assert!(help.contains("pgsandbox-mcp local stop"));
-        assert!(help.contains("pgsandbox-mcp local status"));
+        assert!(help.contains("pgsandbox local init"));
+        assert!(help.contains("pgsandbox local start"));
+        assert!(help.contains("pgsandbox local stop"));
+        assert!(help.contains("pgsandbox local status"));
+    }
+
+    #[test]
+    fn help_text_presents_pgsandbox_as_cli_with_mcp_mode() {
+        let help = help_text();
+
+        assert!(help.starts_with("pgsandbox "));
+        assert!(help.contains("pgsandbox mcp"));
+        assert!(help.contains("pgsandbox create-database"));
+        assert!(help.contains("pgsandbox run-sql"));
+        assert!(!help.contains(&format!("{}-{}", "pgsandbox", "mcp")));
+    }
+
+    #[test]
+    fn cli_tool_commands_cover_public_mcp_tools() {
+        for tool_name in crate::mcp::PUBLIC_MCP_TOOLS {
+            assert!(
+                CLI_TOOL_COMMANDS
+                    .iter()
+                    .any(|command| command.tool_name == *tool_name),
+                "missing CLI command for MCP tool {tool_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_tool_invocation_accepts_hyphenated_command_json_input() {
+        let invocation = parse_cli_tool_invocation(
+            "create-database",
+            &args(&[
+                "--input",
+                r#"{"nameHint":"migration check","ttlMinutes":15}"#,
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(invocation.tool_name, "create_database");
+        assert_eq!(invocation.input["nameHint"], "migration check");
+        assert_eq!(invocation.input["ttlMinutes"], 15);
+    }
+
+    #[test]
+    fn cli_tool_invocation_merges_common_flags_into_json_input() {
+        let invocation = parse_cli_tool_invocation(
+            "run-sql",
+            &args(&[
+                "--database-id",
+                "db-123",
+                "--sql",
+                "select 1",
+                "--readonly",
+                "--row-limit",
+                "5",
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(invocation.tool_name, "run_sql");
+        assert_eq!(invocation.input["databaseId"], "db-123");
+        assert_eq!(invocation.input["sql"], "select 1");
+        assert_eq!(invocation.input["readonly"], true);
+        assert_eq!(invocation.input["rowLimit"], 5);
     }
 
     #[test]
     fn help_text_lists_upgrade_command() {
         let help = help_text();
 
-        assert!(help.contains("pgsandbox-mcp upgrade [options]"));
+        assert!(help.contains("pgsandbox upgrade [options]"));
         assert!(help.contains("--setup <client>"));
         assert!(help.contains("--no-setup"));
     }
@@ -1385,7 +2172,7 @@ mod tests {
     fn help_text_lists_ensure_postgres_command() {
         let help = help_text();
 
-        assert!(help.contains("pgsandbox-mcp ensure-postgres"));
+        assert!(help.contains("pgsandbox ensure-postgres"));
         assert!(help.contains("--no-install"));
         assert!(help.contains("--install-missing"));
     }
@@ -1394,7 +2181,7 @@ mod tests {
     fn help_text_lists_extension_discovery_command() {
         let help = help_text();
 
-        assert!(help.contains("pgsandbox-mcp list-extensions [options]"));
+        assert!(help.contains("pgsandbox list-extensions [options]"));
         assert!(help.contains("--database-id <id>"));
         assert!(help.contains("--database-name <name>"));
     }
@@ -1422,14 +2209,14 @@ mod tests {
 
     #[test]
     fn detects_cargo_or_source_upgrade_path() {
-        let plan = detect_upgrade_plan(Path::new("/repo/target/debug/pgsandbox-mcp"));
+        let plan = detect_upgrade_plan(Path::new("/repo/target/debug/pgsandbox"));
 
         assert_eq!(plan.source, UpgradeInstallSource::Cargo);
     }
 
     #[test]
     fn detects_direct_release_upgrade_path() {
-        let plan = detect_upgrade_plan(Path::new("/home/user/.local/bin/pgsandbox-mcp"));
+        let plan = detect_upgrade_plan(Path::new("/home/user/.local/bin/pgsandbox"));
 
         assert_eq!(plan.source, UpgradeInstallSource::DirectRelease);
     }
@@ -1437,7 +2224,7 @@ mod tests {
     #[test]
     fn detects_homebrew_cellar_path_shape() {
         assert!(path_has_homebrew_cellar_pgsandbox(Path::new(
-            "/opt/homebrew/Cellar/pgsandbox-mcp/0.4.5/bin/pgsandbox-mcp"
+            "/opt/homebrew/Cellar/pgsandbox/0.4.5/bin/pgsandbox"
         )));
     }
 
@@ -1463,7 +2250,7 @@ mod tests {
             &options,
             crate::setup::ClientSelector::All,
             crate::setup::ConfigScope::User,
-            "/usr/local/bin/pgsandbox-mcp",
+            "/usr/local/bin/pgsandbox",
         );
 
         assert_eq!(
@@ -1475,7 +2262,7 @@ mod tests {
                 "--scope",
                 "user",
                 "--command",
-                "/usr/local/bin/pgsandbox-mcp",
+                "/usr/local/bin/pgsandbox",
                 "--postgres-version",
                 "18"
             ])

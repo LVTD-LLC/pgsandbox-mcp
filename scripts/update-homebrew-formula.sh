@@ -42,7 +42,7 @@ case "$sha256" in
     ;;
 esac
 
-release_url="https://github.com/LVTD-LLC/pgsandbox-mcp/releases/download/v${version}/pgsandbox-mcp-${version}.tar.gz"
+release_url="https://github.com/LVTD-LLC/pgsandbox/releases/download/v${version}/pgsandbox-${version}.tar.gz"
 
 FORMULA_PATH=$formula_path RELEASE_URL=$release_url RELEASE_SHA256=$sha256 perl <<'PERL'
 use strict;

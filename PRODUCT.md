@@ -1,8 +1,8 @@
-# PGSandbox MCP Product Context
+# PGSandbox Product Context
 
 ## Purpose
 
-PGSandbox MCP exists so coding agents can use real Postgres safely without
+PGSandbox exists so coding agents can use real Postgres safely without
 touching shared development databases, production-like data, Docker containers,
 or an existing service on port 5432.
 
@@ -21,7 +21,7 @@ isolated disposable one should be faster and safer than skipping verification.
 ## Primary Workflows
 
 1. Install local Postgres binaries if they are not already available.
-2. Register the MCP server with a local client using `pgsandbox-mcp setup`.
+2. Register the MCP server with a local client using `pgsandbox setup`.
 3. Let PGSandbox initialize and start its managed local cluster under
    `~/.pgsandbox/`, choosing a free high port.
 4. Ask an agent to create a disposable database for a task.

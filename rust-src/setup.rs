@@ -152,8 +152,8 @@ pub fn build_launch_config(
 
     McpLaunchConfig {
         name: name.unwrap_or("pgsandbox").to_string(),
-        command: command.unwrap_or("pgsandbox-mcp").to_string(),
-        args: vec!["stdio".to_string()],
+        command: command.unwrap_or("pgsandbox").to_string(),
+        args: vec!["mcp".to_string()],
         env: (!env.is_empty()).then_some(env),
     }
 }
@@ -574,10 +574,8 @@ mod tests {
             write_client_config(&target, &launch, true).unwrap().action,
             "would_update"
         );
-        assert_eq!(
-            parsed["mcpServers"]["pgsandbox"]["command"],
-            "pgsandbox-mcp"
-        );
+        assert_eq!(parsed["mcpServers"]["pgsandbox"]["command"], "pgsandbox");
+        assert_eq!(parsed["mcpServers"]["pgsandbox"]["args"][0], "mcp");
         assert_eq!(
             parsed["mcpServers"]["pgsandbox"]["env"]["PGSANDBOX_ADMIN_DATABASE_URL"],
             "postgres://postgres:secret@localhost:5432/postgres"
@@ -637,14 +635,14 @@ mod tests {
         )
         .unwrap();
 
-        let launch = build_launch_config(None, Some("/opt/bin/pgsandbox-mcp"), None, None);
+        let launch = build_launch_config(None, Some("/opt/bin/pgsandbox"), None, None);
         write_client_config(&target, &launch, false).unwrap();
         let content = fs::read_to_string(target.path).unwrap();
 
         assert!(content.contains("model = \"gpt-5\""));
         assert!(content.contains("[mcp_servers.existing]"));
         assert!(content.contains("[mcp_servers.pgsandbox]"));
-        assert!(content.contains("command = \"/opt/bin/pgsandbox-mcp\""));
+        assert!(content.contains("command = \"/opt/bin/pgsandbox\""));
     }
 
     #[test]
@@ -725,8 +723,8 @@ mod tests {
     fn finds_admin_url_from_escaped_codex_toml() {
         let content = r#"
           [mcp_servers."pg sandbox"]
-          command = "pgsandbox-mcp"
-          args = ["stdio"]
+          command = "pgsandbox"
+          args = ["mcp"]
           env = { PGSANDBOX_ADMIN_DATABASE_URL = "postgres://postgres:\u0073ecret@localhost/postgres" }
         "#;
 

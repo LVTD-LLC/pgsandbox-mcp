@@ -67,14 +67,14 @@ const structuredData = {
   ],
   publisher: {
     '@type': 'Organization',
-    name: 'PGSandbox MCP',
+    name: 'PGSandbox',
     url: new URL('/', Astro.site || Astro.url.origin).toString()
   },
   keywords: post.data.tags.join(', ')
 };
 ---
 <BaseLayout
-  title={`${getBlogTitle(post)} - PGSandbox MCP`}
+  title={`${getBlogTitle(post)} - PGSandbox`}
   description={description}
   canonicalUrl={canonicalUrl}
   imageUrl={post.data.heroImageUrl}

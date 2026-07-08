@@ -10,8 +10,8 @@ const POSTHOG_CAPTURE_URL: &str = "https://us.i.posthog.com/i/v0/e/";
 const TELEMETRY_TIMEOUT_MS: u64 = 750;
 
 pub const EVENT_CLI_COMMAND_COMPLETED: &str = "pgsandbox_cli_command_completed";
-pub const EVENT_MCP_TOOL_COMPLETED: &str = "pgsandbox_mcp_tool_completed";
-pub const EVENT_MCP_SERVER_STARTED: &str = "pgsandbox_mcp_server_started";
+pub const EVENT_MCP_TOOL_COMPLETED: &str = "pgsandbox_tool_completed";
+pub const EVENT_MCP_SERVER_STARTED: &str = "pgsandbox_server_started";
 
 static SESSION_INSTALLATION_ID: LazyLock<String> = LazyLock::new(|| Uuid::new_v4().to_string());
 
@@ -78,7 +78,7 @@ pub fn properties(entries: impl IntoIterator<Item = (&'static str, Value)>) -> M
 }
 
 fn capture_payload(distinct_id: &str, event: &str, mut properties: Map<String, Value>) -> Value {
-    properties.insert("app".to_string(), json!("pgsandbox-mcp"));
+    properties.insert("app".to_string(), json!("pgsandbox"));
     properties.insert("version".to_string(), json!(VERSION));
     properties.insert("os".to_string(), json!(std::env::consts::OS));
     properties.insert("arch".to_string(), json!(std::env::consts::ARCH));
@@ -96,7 +96,7 @@ fn installation_id() -> String {
     let Some(mut path) = dirs::config_dir() else {
         return session_installation_id();
     };
-    path.push("pgsandbox-mcp");
+    path.push("pgsandbox");
     path.push("telemetry-id");
 
     if let Ok(existing) = fs::read_to_string(&path) {
@@ -136,7 +136,7 @@ mod tests {
         assert_eq!(payload["event"], EVENT_MCP_TOOL_COMPLETED);
         assert_eq!(payload["distinct_id"], "install-id");
         assert_eq!(payload["properties"]["tool"], "create_database");
-        assert_eq!(payload["properties"]["app"], "pgsandbox-mcp");
+        assert_eq!(payload["properties"]["app"], "pgsandbox");
         assert_eq!(payload["properties"]["$process_person_profile"], false);
     }
 
