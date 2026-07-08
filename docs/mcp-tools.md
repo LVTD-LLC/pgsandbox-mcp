@@ -229,6 +229,12 @@ server packages. Automatic installs use Homebrew on macOS; `apt-get`, `dnf`,
 does not install Docker, does not bind `localhost:5432`, and does not write MCP
 client config.
 
+Package-manager install failures return code
+`local_postgres_install_failed` with category `local_postgres`. The error detail
+handle includes bounded installer stdout/stderr so agents can distinguish an
+unavailable formula/package from network, permissions, or command failures
+without asking the developer to inspect local logs.
+
 ## `doctor`
 
 Returns MCP-safe version, profile health, and redacted diagnostics without
@@ -270,6 +276,9 @@ Inputs:
 - `ttlMinutes`: optional positive TTL in minutes, capped by server config.
   Omit it to use the profile default. `0`, negative values, and values above
   `maxTtlMinutes` return `code: "invalid_ttl"`.
+- `timeoutSeconds`: optional timeout for the `pg_dump`/`pg_restore` phase,
+  capped by the server. Defaults to 240 seconds so PGSandbox can return a
+  structured timeout before common MCP client call budgets are exhausted.
 - `owner`: optional agent/session identifier
 - `labels`: optional key/value metadata
 - `schemaOnly`: optional boolean to clone schema without table data
@@ -294,6 +303,8 @@ Returns:
 - `connectionUsage`
 - `source`: currently `external`
 - `schemaOnly`
+- `sourceSizeBytes`: best-effort source database size estimate from preflight,
+  or null when unavailable
 - `installedExtensions`: normalized extension names installed before restore
 - `excludedSourceExtensions`: normalized source extension names omitted from
   the restore archive
@@ -309,6 +320,10 @@ Notes:
   extensions, and use `extensions` for target extensions that should be
   installed before restore.
 - If restore fails, PGSandbox attempts to delete the newly created sandbox.
+- If the dump/restore phase exceeds `timeoutSeconds`, PGSandbox returns
+  `code: "command_timeout"` with `category: "timeout"` before the default MCP
+  call budget. The error detail handle includes the timeout, source size
+  estimate when available, created sandbox id/name, and cleanup status.
 - Restore failures caused by unsupported dump-time settings such as
   `transaction_timeout` return `category: "restore_incompatible"` with a hint
   to use compatible `pg_dump`/`pg_restore` binaries, choose a newer target

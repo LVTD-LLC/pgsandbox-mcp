@@ -13,13 +13,14 @@ use crate::{
     doctor::{mask_connection_string, run_doctor},
     local::LocalPostgresCluster,
     postgres::{
-        CleanupExpiredInput, CloneDatabaseInput, ConnectionStringInput, CreateDatabaseInput,
-        CreateSandboxFromTemplateInput, CreateSchemaSnapshotInput, CreateTemplateFromSandboxInput,
-        DatabaseSelector, DeleteSchemaSnapshotInput, DeleteTemplateInput, DescribeSchemaInput,
-        DiffSchemaSnapshotInput, ExplainQueryInput, ListDatabasesInput, ListExtensionsInput,
-        ListProfilesInput, ListSchemaSnapshotsInput, ListTemplatesInput, PostgresSandboxManager,
-        PrepareForRepoInput, ResolvedTargetContext, RunRepoCommandInput, RunSqlInput,
-        SchemaDiffInput, SeedDatabaseInput, UnknownProfileError, ValidateSchemaChangeInput,
+        CleanupExpiredInput, CloneDatabaseInput, CloneTimeoutError, ConnectionStringInput,
+        CreateDatabaseInput, CreateSandboxFromTemplateInput, CreateSchemaSnapshotInput,
+        CreateTemplateFromSandboxInput, DatabaseSelector, DeleteSchemaSnapshotInput,
+        DeleteTemplateInput, DescribeSchemaInput, DiffSchemaSnapshotInput, ExplainQueryInput,
+        ListDatabasesInput, ListExtensionsInput, ListProfilesInput, ListSchemaSnapshotsInput,
+        ListTemplatesInput, PostgresSandboxManager, PrepareForRepoInput, ResolvedTargetContext,
+        RunRepoCommandInput, RunSqlInput, SchemaDiffInput, SeedDatabaseInput, UnknownProfileError,
+        ValidateSchemaChangeInput,
     },
     telemetry::{properties, Telemetry, EVENT_MCP_SERVER_STARTED, EVENT_MCP_TOOL_COMPLETED},
 };
@@ -912,6 +913,10 @@ impl ToolErrorResponse {
             body
         } else if let Some(body) = unknown_profile_error_body(error) {
             body
+        } else if let Some(body) = clone_timeout_error_body(error) {
+            body
+        } else if let Some(body) = installer_failure_error_body(&lower, &chain) {
+            body
         } else if lower.contains("explainquery only accepts a single sql statement") {
             ToolErrorBody {
                 code: "single_statement_required",
@@ -1284,6 +1289,130 @@ fn unknown_profile_error_body(error: &anyhow::Error) -> Option<ToolErrorBody> {
             "knownProfiles": profile_error.known_profiles,
         })),
     })
+}
+
+fn clone_timeout_error_body(error: &anyhow::Error) -> Option<ToolErrorBody> {
+    let timeout = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<CloneTimeoutError>())?;
+    let cleanup_hint = if timeout.cleanup_succeeded {
+        "The created sandbox was already deleted; no sandbox cleanup is required."
+    } else {
+        "Cleanup did not complete. Call list_databases with the resolved profile, then delete the created sandbox if it is still present."
+    };
+    let cleanup_error = timeout.cleanup_error.as_deref().map(sanitize_error_message);
+
+    Some(ToolErrorBody {
+        code: "command_timeout",
+        category: "timeout",
+        message: timeout.to_string(),
+        hint: format!(
+            "Increase timeoutSeconds if this clone is expected to run longer, retry with schemaOnly=true, or choose a smaller source/template path. {cleanup_hint}"
+        ),
+        sqlstate: None,
+        requested_version: None,
+        source_version: None,
+        target_version: None,
+        resolved_profile: None,
+        resolved_postgres_version: None,
+        detected_versions: Vec::new(),
+        detail_handle: Some(json!({
+            "type": "clone-timeout",
+            "tool": "clone_database",
+            "timeoutSeconds": timeout.timeout_seconds,
+            "sourceSizeBytes": timeout.source_size_bytes,
+            "databaseId": timeout.database_id,
+            "databaseName": timeout.database_name,
+            "cleanupSucceeded": timeout.cleanup_succeeded,
+            "cleanupError": cleanup_error,
+        })),
+    })
+}
+
+fn installer_failure_error_body(lower: &str, message: &str) -> Option<ToolErrorBody> {
+    if !lower.contains("failed to install postgresql with")
+        && !lower.contains("installing postgresql with")
+        && !lower.contains("brew install postgresql")
+    {
+        return None;
+    }
+
+    let requested_version = requested_version_from_message(message);
+    let install_method = installer_method_from_message(lower);
+    let bin_dir = requested_version
+        .as_ref()
+        .map(|version| format!("PGSANDBOX_POSTGRES_{version}_BIN_DIR"))
+        .unwrap_or_else(|| "PGSANDBOX_POSTGRES_BIN_DIR".to_string());
+    let compact_message = requested_version
+        .as_ref()
+        .map(|version| {
+            format!("Local Postgres {version} installation with {install_method} failed.")
+        })
+        .unwrap_or_else(|| format!("Local Postgres installation with {install_method} failed."));
+    let hint = requested_version
+        .as_ref()
+        .map(|version| {
+            format!(
+                "Install Postgres {version} manually and set {bin_dir}, or choose a newer target Postgres version for clone-from-Postgres {version} workflows when matching local target binaries are unavailable."
+            )
+        })
+        .unwrap_or_else(|| {
+            format!("Install PostgreSQL manually and set {bin_dir}, or retry after fixing the package-manager failure.")
+        });
+
+    Some(ToolErrorBody {
+        code: "local_postgres_install_failed",
+        category: "local_postgres",
+        message: compact_message,
+        hint,
+        sqlstate: None,
+        requested_version,
+        source_version: None,
+        target_version: None,
+        resolved_profile: None,
+        resolved_postgres_version: None,
+        detected_versions: detected_postgres_versions(),
+        detail_handle: Some(json!({
+            "type": "diagnostic",
+            "tool": "ensure_postgres",
+            "installMethod": install_method,
+            "installerOutput": bounded_error_detail(message),
+        })),
+    })
+}
+
+fn installer_method_from_message(lower: &str) -> &'static str {
+    if lower.contains("homebrew") || lower.contains("brew install") {
+        "Homebrew"
+    } else if lower.contains("apt-get") {
+        "apt-get"
+    } else if lower.contains("dnf") {
+        "dnf"
+    } else if lower.contains("yum") {
+        "yum"
+    } else if lower.contains("zypper") {
+        "zypper"
+    } else if lower.contains("pacman") {
+        "pacman"
+    } else if lower.contains("winget") {
+        "WinGet"
+    } else if lower.contains("choco") || lower.contains("chocolatey") {
+        "Chocolatey"
+    } else {
+        "package manager"
+    }
+}
+
+fn bounded_error_detail(message: &str) -> String {
+    const MAX_DETAIL_LEN: usize = 4_000;
+    if message.len() <= MAX_DETAIL_LEN {
+        return message.to_string();
+    }
+    let mut end = MAX_DETAIL_LEN;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &message[..end])
 }
 
 fn postgres_db_error_body(error: &anyhow::Error, message: &str) -> Option<ToolErrorBody> {
@@ -2066,6 +2195,32 @@ mod tests {
     }
 
     #[test]
+    fn installer_failures_include_output_and_next_action() {
+        let result = tool_json::<()>(Err(anyhow::anyhow!(
+            "failed to ensure local Postgres 13: failed to install PostgreSQL with Homebrew. Install PostgreSQL manually and set PGSANDBOX_POSTGRES_BIN_DIR, or set PGSANDBOX_POSTGRES_<MAJOR>_BIN_DIR for a requested major version.: `brew install postgresql@13` failed with status 1: Error: postgresql@13 has been disabled because it is not supported upstream"
+        )))
+        .unwrap();
+        let text = result.content[0].as_text().unwrap().text.clone();
+        let value = serde_json::from_str::<Value>(&text).unwrap();
+
+        assert_eq!(first_error(&value)["code"], "local_postgres_install_failed");
+        assert_eq!(first_error(&value)["category"], "local_postgres");
+        assert_eq!(first_error(&value)["requestedVersion"], "13");
+        assert!(first_error(&value)["hint"]
+            .as_str()
+            .unwrap()
+            .contains("PGSANDBOX_POSTGRES_13_BIN_DIR"));
+        assert!(first_error(&value)["hint"]
+            .as_str()
+            .unwrap()
+            .contains("newer target Postgres version"));
+        assert!(value["detailHandles"][0]["installerOutput"]
+            .as_str()
+            .unwrap()
+            .contains("postgresql@13 has been disabled"));
+    }
+
+    #[test]
     fn tool_error_body_serializes_empty_detected_versions_array() {
         let body = ToolErrorBody {
             code: "local_postgres_unavailable",
@@ -2141,6 +2296,31 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("compatible pg_dump/pg_restore"));
+    }
+
+    #[test]
+    fn clone_timeouts_are_structured_with_cleanup_detail() {
+        let error = anyhow::Error::new(crate::postgres::CloneTimeoutError {
+            timeout_seconds: 240,
+            source_size_bytes: Some(11_811_160_064),
+            database_id: "db-id".to_string(),
+            database_name: "pgsandbox_rekindled_abc123".to_string(),
+            cleanup_succeeded: true,
+            cleanup_error: None,
+        });
+        let result = tool_json::<()>(Err(error)).unwrap();
+        let text = result.content[0].as_text().unwrap().text.clone();
+        let value = serde_json::from_str::<Value>(&text).unwrap();
+
+        assert_eq!(first_error(&value)["code"], "command_timeout");
+        assert_eq!(first_error(&value)["category"], "timeout");
+        assert_eq!(value["detailHandles"][0]["type"], "clone-timeout");
+        assert_eq!(value["detailHandles"][0]["cleanupSucceeded"], true);
+        assert_eq!(
+            value["detailHandles"][0]["sourceSizeBytes"],
+            11_811_160_064_i64
+        );
+        assert_eq!(value["detailHandles"][0]["databaseId"], "db-id");
     }
 
     #[test]

@@ -35,8 +35,8 @@ use uuid::Uuid;
 
 use crate::{
     config::{
-        find_profile, find_profile_for_request, ConfigError, SandboxConfig, SandboxProfile,
-        DEFERRED_LOCAL_ADMIN_URL,
+        find_profile, find_profile_for_request, normalize_postgres_version, ConfigError,
+        SandboxConfig, SandboxProfile, DEFERRED_LOCAL_ADMIN_URL,
     },
     local::{discover_local_postgres_installations, LocalClusterConfig, LocalPostgresCluster},
     mcp::PUBLIC_MCP_TOOL_COUNT,
@@ -55,6 +55,7 @@ const SCHEMA_DIGEST_VERSION: u32 = 3;
 const MAX_SCHEMA_DIFF_ITEMS: usize = 50;
 const DEFAULT_WORKFLOW_TIMEOUT_SECONDS: u64 = 120;
 const MAX_WORKFLOW_TIMEOUT_SECONDS: u64 = 600;
+const DEFAULT_CLONE_TIMEOUT_SECONDS: u64 = 240;
 const DEFAULT_SCHEMA_OPERATION_TIMEOUT_SECONDS: u64 = 30;
 const CONNECTION_TASK_CLOSE_TIMEOUT_SECONDS: u64 = 2;
 const CLEANUP_EXPIRED_LIMIT: usize = 50;
@@ -100,6 +101,42 @@ impl fmt::Display for UnknownProfileError {
 }
 
 impl std::error::Error for UnknownProfileError {}
+
+#[derive(Debug)]
+pub(crate) struct CloneTimeoutError {
+    pub(crate) timeout_seconds: u64,
+    pub(crate) source_size_bytes: Option<i64>,
+    pub(crate) database_id: String,
+    pub(crate) database_name: String,
+    pub(crate) cleanup_succeeded: bool,
+    pub(crate) cleanup_error: Option<String>,
+}
+
+impl fmt::Display for CloneTimeoutError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let source_size = self
+            .source_size_bytes
+            .map(|bytes| format!("{bytes} bytes"))
+            .unwrap_or_else(|| "unavailable".to_string());
+        let cleanup = if self.cleanup_succeeded {
+            "was deleted".to_string()
+        } else {
+            "could not be deleted automatically".to_string()
+        };
+
+        write!(
+            formatter,
+            "clone_database timed out after {} seconds during pg_dump/pg_restore; source database size estimate: {}; created sandbox {} ({}) {}",
+            self.timeout_seconds,
+            source_size,
+            self.database_id,
+            self.database_name,
+            cleanup
+        )
+    }
+}
+
+impl std::error::Error for CloneTimeoutError {}
 
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedTargetContext {
@@ -168,6 +205,7 @@ pub struct CloneDatabaseInput {
     pub source_database_url: String,
     pub name_hint: Option<String>,
     pub ttl_minutes: Option<i64>,
+    pub timeout_seconds: Option<u64>,
     pub owner: Option<String>,
     pub labels: Option<BTreeMap<String, Value>>,
     pub schema_only: Option<bool>,
@@ -584,6 +622,7 @@ pub struct CloneDatabaseOutput {
     pub connection_usage: ConnectionUsageHints,
     pub source: String,
     pub schema_only: bool,
+    pub source_size_bytes: Option<i64>,
     pub installed_extensions: Vec<String>,
     pub excluded_source_extensions: Vec<String>,
 }
@@ -611,6 +650,7 @@ impl fmt::Debug for CloneDatabaseOutput {
             .field("connection_usage", &self.connection_usage)
             .field("source", &self.source)
             .field("schema_only", &self.schema_only)
+            .field("source_size_bytes", &self.source_size_bytes)
             .field("installed_extensions", &self.installed_extensions)
             .field(
                 "excluded_source_extensions",
@@ -1345,6 +1385,12 @@ struct CommandRunResult {
     stderr_truncated: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CloneSourcePreflight {
+    source_major: String,
+    size_bytes: Option<i64>,
+}
+
 #[derive(Debug)]
 struct TemplatePaths {
     dump_path: PathBuf,
@@ -1441,15 +1487,12 @@ impl PostgresSandboxManager {
             Err(ConfigError::UnknownPostgresVersion(version)) => {
                 Err(unknown_postgres_version_error(&self.config, &version))
             }
-            Err(ConfigError::UnknownProfile(profile))
-                if self.config.managed_local.enabled
-                    && postgres_version.is_none()
-                    && profile_name == Some(profile.as_str()) =>
-            {
-                let Some(version) = profile.strip_prefix("local-pg") else {
-                    return Err(self.unknown_profile_error(profile));
-                };
-                self.ensure_managed_local_profile(Some(version))
+            Err(ConfigError::UnknownProfile(profile)) if self.config.managed_local.enabled => {
+                match managed_local_profile_version_request(&profile, postgres_version) {
+                    Ok(Some(version)) => self.ensure_managed_local_profile(Some(&version)),
+                    Ok(None) => Err(self.unknown_profile_error(profile)),
+                    Err(error) => Err(error.into()),
+                }
             }
             Err(ConfigError::UnknownProfile(profile)) => Err(self.unknown_profile_error(profile)),
             Err(error) => Err(error.into()),
@@ -1960,6 +2003,7 @@ impl PostgresSandboxManager {
             source_database_url,
             name_hint,
             ttl_minutes,
+            timeout_seconds,
             owner,
             labels,
             schema_only,
@@ -1967,6 +2011,7 @@ impl PostgresSandboxManager {
             exclude_source_extensions,
         } = input;
         let schema_only = schema_only.unwrap_or(false);
+        let timeout = clone_timeout(timeout_seconds);
         let excluded_source_extensions =
             clone_excluded_source_extensions(exclude_source_extensions)?;
         let target_profile =
@@ -1977,9 +2022,10 @@ impl PostgresSandboxManager {
             .with_context(|| target_context.clone())?;
         let target_context =
             target_context.with_resolved_postgres_version(target_postgres_version.clone());
-        preflight_clone_compatibility(&source_database_url, &target_postgres_version)
-            .await
-            .with_context(|| target_context.clone())?;
+        let source_preflight =
+            preflight_clone_source(&source_database_url, &target_postgres_version)
+                .await
+                .with_context(|| target_context.clone())?;
         let created = self
             .create_database(CreateDatabaseInput {
                 profile: Some(target_profile.name.clone()),
@@ -1993,33 +2039,60 @@ impl PostgresSandboxManager {
             .await
             .with_context(|| target_context.clone())?;
 
-        let clone_result = clone_with_pg_tools(
-            &source_database_url,
-            &created.connection_string,
-            schema_only,
-            &excluded_source_extensions,
+        let clone_result = time::timeout(
+            timeout,
+            clone_with_pg_tools(
+                &source_database_url,
+                &created.connection_string,
+                schema_only,
+                &excluded_source_extensions,
+            ),
         )
         .await;
 
-        if let Err(error) = clone_result {
-            let cleanup_result = self
-                .delete_database(DatabaseSelector {
-                    profile: Some(created.profile.clone()),
-                    postgres_version: None,
-                    database_id: Some(created.database_id.clone()),
-                    database_name: None,
-                })
-                .await;
-            let clone_error = match cleanup_result {
-                Ok(_) => anyhow::anyhow!(
-                    "database clone failed; created sandbox was deleted: {error}"
-                ),
-                Err(cleanup_error) => anyhow::anyhow!(
-                    "database clone failed and cleanup also failed for {}: {error}; cleanup error: {cleanup_error}",
-                    created.database_name
-                ),
-            };
-            return Err(clone_error).with_context(|| target_context.clone());
+        match clone_result {
+            Err(_) => {
+                let cleanup_result = self
+                    .delete_database(DatabaseSelector {
+                        profile: Some(created.profile.clone()),
+                        postgres_version: None,
+                        database_id: Some(created.database_id.clone()),
+                        database_name: None,
+                    })
+                    .await;
+                let cleanup_succeeded = cleanup_result.is_ok();
+                let timeout_error = CloneTimeoutError {
+                    timeout_seconds: timeout.as_secs(),
+                    source_size_bytes: source_preflight.size_bytes,
+                    database_id: created.database_id.clone(),
+                    database_name: created.database_name.clone(),
+                    cleanup_succeeded,
+                    cleanup_error: cleanup_result.err().map(|error| format!("{error:#}")),
+                };
+                return Err(anyhow::Error::new(timeout_error))
+                    .with_context(|| target_context.clone());
+            }
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                let cleanup_result = self
+                    .delete_database(DatabaseSelector {
+                        profile: Some(created.profile.clone()),
+                        postgres_version: None,
+                        database_id: Some(created.database_id.clone()),
+                        database_name: None,
+                    })
+                    .await;
+                let clone_error = match cleanup_result {
+                    Ok(_) => anyhow::anyhow!(
+                        "database clone failed; created sandbox was deleted: {error}"
+                    ),
+                    Err(cleanup_error) => anyhow::anyhow!(
+                        "database clone failed and cleanup also failed for {}: {error}; cleanup error: {cleanup_error}",
+                        created.database_name
+                    ),
+                };
+                return Err(clone_error).with_context(|| target_context.clone());
+            }
         }
 
         Ok(CloneDatabaseOutput {
@@ -2038,6 +2111,7 @@ impl PostgresSandboxManager {
             connection_string: created.connection_string,
             source: "external".to_string(),
             schema_only,
+            source_size_bytes: source_preflight.size_bytes,
             installed_extensions: created.installed_extensions,
             excluded_source_extensions,
         })
@@ -3644,6 +3718,33 @@ impl PostgresSandboxManager {
     }
 }
 
+fn managed_local_profile_version_request(
+    profile_name: &str,
+    postgres_version: Option<&str>,
+) -> Result<Option<String>, ConfigError> {
+    let Some(profile_version) = profile_name.strip_prefix("local-pg") else {
+        return Ok(None);
+    };
+    let profile_version = normalize_postgres_version(profile_version);
+    if profile_version.is_empty() {
+        return Ok(None);
+    }
+
+    let Some(requested_version) = postgres_version else {
+        return Ok(Some(profile_version));
+    };
+    let requested_version = normalize_postgres_version(requested_version);
+    if requested_version == profile_version {
+        Ok(Some(profile_version))
+    } else {
+        Err(ConfigError::PostgresVersionConflict {
+            profile: profile_name.to_string(),
+            profile_version,
+            requested_version,
+        })
+    }
+}
+
 fn unknown_postgres_version_error(config: &SandboxConfig, version: &str) -> anyhow::Error {
     let default_profile = config
         .profiles
@@ -4332,30 +4433,49 @@ async fn postgres_version(client: &Client) -> anyhow::Result<String> {
     Ok(row.get::<_, String>(0))
 }
 
-async fn preflight_clone_compatibility(
+async fn preflight_clone_source(
     source_database_url: &str,
     target_major: &str,
-) -> anyhow::Result<()> {
-    let source_version = postgres_server_version_for_url(source_database_url)
+) -> anyhow::Result<CloneSourcePreflight> {
+    let source_preflight = postgres_source_preflight_for_url(source_database_url)
         .await
         .context("failed to inspect source Postgres version before clone")?;
-    let source_major = postgres_major_from_server_version(&source_version)?;
 
-    if clone_downgrade_error(&source_major, target_major).is_some() {
+    if clone_downgrade_error(&source_preflight.source_major, target_major).is_some() {
         anyhow::bail!(
-            "restore_incompatible: cannot clone from Postgres {source_major} into older target Postgres {target_major}. Choose postgresVersion {source_major} or newer, or dump from an older-compatible source."
+            "restore_incompatible: cannot clone from Postgres {} into older target Postgres {target_major}. Choose postgresVersion {} or newer, or dump from an older-compatible source.",
+            source_preflight.source_major,
+            source_preflight.source_major,
         );
     }
 
-    Ok(())
+    Ok(source_preflight)
 }
 
-async fn postgres_server_version_for_url(database_url: &str) -> anyhow::Result<String> {
+async fn postgres_source_preflight_for_url(
+    database_url: &str,
+) -> anyhow::Result<CloneSourcePreflight> {
     let (client, connection_task) = connect_url(database_url).await?;
-    let version = postgres_version(&client).await;
+    let preflight = async {
+        let version = postgres_version(&client).await?;
+        let source_major = postgres_major_from_server_version(&version)?;
+        let size_bytes = source_database_size_bytes(&client).await.ok();
+        anyhow::Ok(CloneSourcePreflight {
+            source_major,
+            size_bytes,
+        })
+    }
+    .await;
     drop(client);
     let _ = connection_task.await;
-    version
+    preflight
+}
+
+async fn source_database_size_bytes(client: &Client) -> anyhow::Result<i64> {
+    let row = client
+        .query_one("SELECT pg_database_size(current_database())::bigint", &[])
+        .await?;
+    Ok(row.get::<_, i64>(0))
 }
 
 async fn postgres_major_for_profile(profile: &SandboxProfile) -> anyhow::Result<String> {
@@ -4807,6 +4927,14 @@ fn workflow_timeout(timeout_seconds: Option<u64>) -> StdDuration {
     StdDuration::from_secs(
         timeout_seconds
             .unwrap_or(DEFAULT_WORKFLOW_TIMEOUT_SECONDS)
+            .min(MAX_WORKFLOW_TIMEOUT_SECONDS),
+    )
+}
+
+fn clone_timeout(timeout_seconds: Option<u64>) -> StdDuration {
+    StdDuration::from_secs(
+        timeout_seconds
+            .unwrap_or(DEFAULT_CLONE_TIMEOUT_SECONDS)
             .min(MAX_WORKFLOW_TIMEOUT_SECONDS),
     )
 }
@@ -6532,10 +6660,7 @@ async fn clone_with_pg_tools_filtered_archive(
                 "failed to start pg_restore; install PostgreSQL client tools and ensure pg_restore is on PATH",
             )?;
         if !restore_output.status.success() {
-            anyhow::bail!(
-                "pg_restore failed: {}",
-                summarize_tool_stderr(&restore_output.stderr)
-            );
+            anyhow::bail!("{}", filtered_archive_restore_failure_message(&restore_output.stderr));
         }
 
         anyhow::Ok(())
@@ -6683,13 +6808,7 @@ fn clone_tool_failure_message(
     restore_stderr: &[u8],
 ) -> Option<String> {
     if !restore_success {
-        if let Some(message) = restore_transaction_timeout_compatibility_message(restore_stderr) {
-            return Some(message);
-        }
-        return Some(format!(
-            "pg_restore failed: {}",
-            summarize_tool_stderr(restore_stderr)
-        ));
+        return Some(filtered_archive_restore_failure_message(restore_stderr));
     }
     if !dump_success {
         return Some(format!(
@@ -6698,6 +6817,15 @@ fn clone_tool_failure_message(
         ));
     }
     None
+}
+
+fn filtered_archive_restore_failure_message(restore_stderr: &[u8]) -> String {
+    restore_transaction_timeout_compatibility_message(restore_stderr).unwrap_or_else(|| {
+        format!(
+            "pg_restore failed: {}",
+            summarize_tool_stderr(restore_stderr)
+        )
+    })
 }
 
 fn restore_transaction_timeout_compatibility_message(restore_stderr: &[u8]) -> Option<String> {
@@ -8516,6 +8644,27 @@ mod tests {
     }
 
     #[test]
+    fn managed_local_profile_request_accepts_matching_explicit_version() {
+        assert_eq!(
+            managed_local_profile_version_request("local-pg16", Some("16.3")).unwrap(),
+            Some("16".to_string())
+        );
+        assert_eq!(
+            managed_local_profile_version_request("local-pg16", None).unwrap(),
+            Some("16".to_string())
+        );
+
+        let mismatch = managed_local_profile_version_request("local-pg16", Some("17")).unwrap_err();
+        assert!(mismatch
+            .to_string()
+            .contains("does not match requested postgresVersion"));
+        assert_eq!(
+            managed_local_profile_version_request("not-local-pg16", Some("16")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn workflow_errors_include_agent_branching_category() {
         let template = workflow_error("template_not_found", "missing", None);
         let repo_command = workflow_error("repo_command_failed", "failed", None);
@@ -9299,6 +9448,7 @@ mod tests {
             connection_usage: connection_usage_hints(connection_string),
             source: "external".to_string(),
             schema_only: false,
+            source_size_bytes: None,
             installed_extensions: Vec::new(),
             excluded_source_extensions: Vec::new(),
         })
@@ -9494,6 +9644,7 @@ mod tests {
             connection_usage: connection_usage_hints(connection_string),
             source: "external".to_string(),
             schema_only: false,
+            source_size_bytes: Some(42),
             installed_extensions: Vec::new(),
             excluded_source_extensions: Vec::new(),
         };
@@ -10047,6 +10198,47 @@ Command was: SET transaction_timeout = 0;"#,
         assert!(message.starts_with("restore_incompatible:"));
         assert!(message.contains("transaction_timeout"));
         assert!(message.contains("compatible pg_dump/pg_restore"));
+    }
+
+    #[test]
+    fn filtered_archive_restore_failure_is_version_compatibility_error() {
+        let message = filtered_archive_restore_failure_message(
+            br#"pg_restore: error: could not execute query: ERROR:  unrecognized configuration parameter "transaction_timeout"
+Command was: SET transaction_timeout = 0;"#,
+        );
+
+        assert!(message.starts_with("restore_incompatible:"));
+        assert!(message.contains("transaction_timeout"));
+        assert!(message.contains("newer target Postgres version"));
+    }
+
+    #[test]
+    fn clone_input_accepts_timeout_seconds() {
+        let clone = serde_json::from_value::<CloneDatabaseInput>(json!({
+            "sourceDatabaseUrl": "postgres://postgres:secret@localhost/source",
+            "timeoutSeconds": 90
+        }))
+        .unwrap();
+
+        assert_eq!(clone.timeout_seconds, Some(90));
+    }
+
+    #[test]
+    fn clone_timeout_error_records_source_estimate_and_cleanup_status() {
+        let error = CloneTimeoutError {
+            timeout_seconds: 240,
+            source_size_bytes: Some(11_811_160_064),
+            database_id: "db-id".to_string(),
+            database_name: "pgsandbox_rekindled_abc123".to_string(),
+            cleanup_succeeded: true,
+            cleanup_error: None,
+        };
+        let message = error.to_string();
+
+        assert!(message.contains("timed out after 240 seconds"));
+        assert!(message.contains("source database size estimate: 11811160064 bytes"));
+        assert!(message.contains("created sandbox db-id"));
+        assert!(message.contains("was deleted"));
     }
 
     #[test]
