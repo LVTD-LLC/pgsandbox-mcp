@@ -481,6 +481,7 @@ pgsandbox local start [options]
 pgsandbox local stop [options]
 pgsandbox local status [options]
 pgsandbox smoke-test [options]
+pgsandbox uninstall [options]
 pgsandbox --version
 pgsandbox --help
 ```
@@ -1119,6 +1120,7 @@ Run root scripts from the repository root.
 | `npm run start` | Run `cargo run --`. |
 | `npm run package:homebrew` | Build release binary and create `dist/pgsandbox-<version>.tar.gz` for the Homebrew formula flow. |
 | `npm run package:release` | Build target-specific release archive and checksum file in `dist/`. |
+| `npm run uninstall:pgsandbox -- --dry-run` | Preview a local uninstall/reset of PGSandbox binaries, MCP client entries, and managed local state. |
 | `npm run site:build` | Run the Astro site build through the root package. |
 | `npm run site:check-changelog` | Verify site changelog fallback content. |
 | `npm run site:check-blog-content` | Validate blog content conventions. |
@@ -1158,6 +1160,7 @@ CLI commands after installation:
 | `pgsandbox ensure-postgres --postgres-version 13` | Install missing local Postgres 13 binaries with a supported package manager when available, then start `local-pg13`. |
 | `pgsandbox upgrade` | Upgrade Homebrew/install-script installs, rerun setup for all clients, and run doctor. |
 | `pgsandbox upgrade --setup codex` | Upgrade and only refresh the Codex config. |
+| `pgsandbox uninstall --dry-run` | Preview removal of PGSandbox binaries, MCP client entries, and managed local state. |
 | `pgsandbox local init` | Initialize managed local Postgres without starting it. |
 | `pgsandbox local start` | Initialize if needed and start managed local Postgres. |
 | `pgsandbox local status` | Show managed local status. |

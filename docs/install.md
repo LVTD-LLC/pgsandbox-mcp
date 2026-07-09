@@ -227,6 +227,48 @@ cargo install --git https://github.com/LVTD-LLC/pgsandbox --tag v<VERSION> --for
 
 Replace `v<VERSION>` with the release tag you want to install.
 
+## Full Uninstall And Fresh-Install Reset
+
+Use the CLI uninstall command when you need to test a clean install path or
+remove local PGSandbox state before reinstalling:
+
+```bash
+pgsandbox uninstall --dry-run
+pgsandbox uninstall --yes
+```
+
+From a repository checkout, or before installing a release that includes the
+CLI command, the standalone helper is also available:
+
+```bash
+sh scripts/uninstall.sh --dry-run
+sh scripts/uninstall.sh --yes
+```
+
+Users without a repository checkout can run the standalone helper from GitHub:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox/main/scripts/uninstall.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/LVTD-LLC/pgsandbox/main/scripts/uninstall.sh | sh -s -- --yes
+```
+
+The command removes both CLI names, `pgsandbox-mcp` and `pgsandbox`,
+from Homebrew, Cargo, npm global installs, common direct-install directories,
+and matching paths currently on `PATH`. It also removes the `pgsandbox` MCP
+server entry from Codex, Cursor, VS Code, and Claude Desktop configs while
+preserving unrelated servers, then deletes managed local state under
+`${PGSANDBOX_HOME:-~/.pgsandbox}` and `/tmp/pgsandbox-sockets`.
+
+If you configured a non-default MCP server name, pass it explicitly:
+
+```bash
+pgsandbox uninstall --server-name my-pgsandbox --yes
+```
+
+The helper does not uninstall PostgreSQL itself. If you used an external
+`PGSANDBOX_ADMIN_DATABASE_URL`, delete any external PGSandbox sandboxes before
+removing the CLI because local state deletion cannot clean an external server.
+
 Rerunning `setup` updates the existing local MCP config entry and preserves
 unrelated MCP servers. Restart the MCP client after updating; in Codex, run
 `/mcp` after restart to verify the `pgsandbox` server is available.
