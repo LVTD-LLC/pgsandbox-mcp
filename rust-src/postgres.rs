@@ -66,6 +66,7 @@ const MAX_WORKFLOW_COMMAND_PART_BYTES: usize = 256;
 const MAX_WORKFLOW_STDIN_BYTES: usize = 65_536;
 const MAX_DATABASE_URL_ENV_NAMES: usize = 16;
 const MAX_REPO_COMMAND_REDACTION_OVERLAP_BYTES: usize = 256;
+const REPO_COMMAND_OUTPUT_DRAIN_GRACE_MILLIS: u64 = 500;
 const MAX_PROFILE_HINTS: usize = 20;
 const TEMPLATE_PRIVACY_WARNING: &str =
     "Templates are local PGSandbox artifacts. Do not create templates from production or sensitive data unless you have explicitly sanitized it.";
@@ -5300,10 +5301,12 @@ async fn execute_repo_command(
         if let Some(task) = stdin_task.as_ref() {
             task.abort();
         }
-        stdout_task.abort();
-        stderr_task.abort();
         terminate_repo_command(&mut child, process_group_id).await;
-        (None, String::new(), false, String::new(), false)
+        let (stdout, stderr) = tokio::join!(
+            drain_repo_command_output_after_timeout(&mut stdout_task, stdout_result),
+            drain_repo_command_output_after_timeout(&mut stderr_task, stderr_result),
+        );
+        (None, stdout.0, stdout.1, stderr.0, stderr.1)
     } else {
         if exit_code == Some(0) {
             if let Some(error) = stdin_delivery_error {
@@ -5370,6 +5373,28 @@ async fn terminate_repo_command(child: &mut tokio::process::Child, process_group
     }
     let _ = child.kill().await;
     let _ = child.wait().await;
+}
+
+async fn drain_repo_command_output_after_timeout(
+    task: &mut tokio::task::JoinHandle<anyhow::Result<(String, bool)>>,
+    completed: Option<(String, bool)>,
+) -> (String, bool) {
+    if let Some(output) = completed {
+        return output;
+    }
+
+    match time::timeout(
+        StdDuration::from_millis(REPO_COMMAND_OUTPUT_DRAIN_GRACE_MILLIS),
+        &mut *task,
+    )
+    .await
+    {
+        Ok(Ok(Ok(output))) => output,
+        Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
+            task.abort();
+            (String::new(), true)
+        }
+    }
 }
 
 fn apply_command_env(command: &mut Command, env: &BTreeMap<String, String>) {
@@ -8829,6 +8854,32 @@ mod tests {
 
         assert!(result.timed_out, "{result:?}");
         assert_eq!(result.exit_code, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn repo_command_timeout_preserves_output_emitted_before_hang() {
+        let directory = tempfile::tempdir().unwrap();
+        let command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf ready; printf warning >&2; sleep 2".to_string(),
+        ];
+
+        let result = execute_repo_command(
+            directory.path(),
+            &command,
+            test_database_url(),
+            StdDuration::from_millis(100),
+            RepoCommandExecutionOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.timed_out, "{result:?}");
+        assert_eq!(result.stdout, "ready");
+        assert!(result.stderr.starts_with("warning"), "{result:?}");
+        assert!(result.stderr.contains("timed out"), "{result:?}");
     }
 
     #[cfg(unix)]
