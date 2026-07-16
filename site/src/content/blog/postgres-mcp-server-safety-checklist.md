@@ -70,6 +70,8 @@ There are two jobs:
 
 Those jobs need different authority. PostgreSQL requires superuser or `CREATEDB` privilege to create a database (https://www.postgresql.org/docs/current/sql-createdatabase.html). PostgreSQL roles also control ownership and privileges; the `CREATE ROLE` documentation warns that superuser status bypasses access restrictions and should be used only when needed (https://www.postgresql.org/docs/current/sql-createrole.html).
 
+Use a separate generated login for every writable task database. The [per-sandbox Postgres role guide](/blog/per-sandbox-postgres-roles-coding-agents/) shows the exact PGSandbox role/database pair, a verification query packet, and the important caveat that PostgreSQL roles are cluster-wide even when the workflow pairs one role with one database.
+
 So the admin URL should be a lifecycle credential, not the credential the agent uses for normal SQL. The safer pattern is:
 
 1. The MCP server uses an admin URL to create a new database and a new role.

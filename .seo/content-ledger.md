@@ -22,6 +22,7 @@
 | 2026-07-13 | Guide | Owner and Label Policy for Shared PGSandbox Profiles | owner-label-policy-shared-pgsandbox-profiles | postgres sandbox cleanup | /docs/mcp-tools/, /docs/architecture/, /blog/how-to-use-cleanup-expired-for-stale-pgsandbox-resources/, /blog/cleanup-expired-vs-manual-postgres-cleanup/, /blog/postgres-mcp-server-safety-checklist/ | Astro Markdown source of truth; uses a concrete owner/label taxonomy and cleanup selection contract as the information-gain framework. |
 | 2026-07-14 | How-to / tutorial | Postgres Test Database Cleanup: Choosing Sandbox TTLs | postgres-sandbox-ttl-values | postgres test database cleanup | /docs/mcp-tools/, /docs/architecture/, /docs/agent-workflows/, /blog/how-to-use-cleanup-expired-for-stale-pgsandbox-resources/, /blog/owner-label-policy-shared-pgsandbox-profiles/, /blog/database-migration-testing-agent-pr/ | Astro Markdown source of truth; uses task runtime + review buffer + recovery margin as the retention-budget framework. |
 | 2026-07-15 | Guide / checklist | Postgres Sandbox Quotas for Coding Agents | postgres-sandbox-quotas-coding-agents | postgres sandbox quotas | /docs/architecture/, /docs/mcp-tools/, /blog/postgres-sandbox-ttl-values/, /blog/owner-label-policy-shared-pgsandbox-profiles/, /blog/postgres-mcp-server-safety-checklist/ | Astro Markdown source of truth; documents the exact owner/profile/TTL quota boundary and the five-part active-sandbox budget. |
+| 2026-07-16 | Guide / checklist | Per-Sandbox Postgres Roles for Coding Agents | per-sandbox-postgres-roles-coding-agents | postgres role per database | /docs/architecture/, /docs/mcp-tools/, /blog/postgres-mcp-server-safety-checklist/, /blog/postgres-run-sql-bounded-results/, /blog/postgres-sandbox-quotas-coding-agents/ | Astro Markdown source of truth; uses the lifecycle authority vs task authority vs cluster access matrix as the information-gain framework. |
 
 ## Removed
 
@@ -31,11 +32,11 @@
 
 ## Candidate Backlog
 
-Last researched: 2026-07-15
+Last researched: 2026-07-16
 
 | Rank | Score | Proposed Type | Title | Target Keyword | Volume | KD | Intent | SERP Read | Why It Fits |
 | --- | ---: | --- | --- | --- | ---: | ---: | --- | --- | --- |
-| 1 | 23 | Guide / checklist | Per-sandbox Postgres roles for coding agents | postgres role per database | TBD | TBD | informational | 2026-07-15 web fallback | Explains database ownership, login-role scope, and why task SQL should not use the admin profile. |
+| 1 | 21 | Definition / comparison | PostgreSQL ROLE vs USER for agent database access | postgres role vs user | TBD | TBD | informational | 2026-07-16 web fallback | Clarifies PostgreSQL's unified role model and maps login roles, group roles, ownership, and agent credentials to practical MCP access design. |
 
 ## Notes
 
@@ -59,3 +60,4 @@ Last researched: 2026-07-15
 - 2026-07-13 cron selected the top remaining backlog candidate automatically per cron instruction. DataForSEO was unavailable (`DATAFORSEO_LOGIN` / helper script missing), so live research used PGSandbox docs/repo implementation plus PostgreSQL JSONB, `DROP DATABASE`, and role-removal primary docs. Keyword volume/KD remained `TBD` under fallback. New source-of-truth content file: `site/src/content/blog/owner-label-policy-shared-pgsandbox-profiles.md`.
 - 2026-07-14 cron selected the top remaining backlog candidate automatically per cron instruction. DataForSEO credentials and the helper script were unavailable, so live research used the PGSandbox docs/repo implementation, PostgreSQL database-removal docs, GitHub Actions timeout docs, and SERP/web fallback. Keyword volume/KD remained `TBD`. New source-of-truth content file: `site/src/content/blog/postgres-sandbox-ttl-values.md`.
 - 2026-07-15 cron selected the top remaining backlog candidate automatically per cron instruction. DataForSEO credentials and the helper script were unavailable, so live research used the PGSandbox source/docs, PostgreSQL connection and role docs, MCP security guidance, and SERP/web fallback. Keyword volume/KD remained `TBD`. New source-of-truth content file: `site/src/content/blog/postgres-sandbox-quotas-coding-agents.md`.
+- 2026-07-16 cron selected the top remaining backlog candidate automatically per cron instruction. DataForSEO credentials and the helper script were unavailable, so live research used the PGSandbox source/docs, PostgreSQL role/privilege/authentication docs, MCP security guidance, and SERP/web fallback. Keyword volume/KD remained `TBD`. New source-of-truth content file: `site/src/content/blog/per-sandbox-postgres-roles-coding-agents.md`.

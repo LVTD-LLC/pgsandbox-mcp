@@ -69,6 +69,8 @@ PostgreSQL documents `max_connections` as the server's concurrent connection cei
 
 Neither setting answers, "How many disposable databases may this coding agent leave active?" A sandbox database may have zero connections while waiting for review, or several connections during a test. Database lifecycle count belongs in the lifecycle layer, while connection capacity belongs in PostgreSQL.
 
+The login boundary needs its own review too. A generated role is paired with one sandbox by PGSandbox, but PostgreSQL roles exist at cluster scope. The [per-sandbox Postgres role guide](/blog/per-sandbox-postgres-roles-coding-agents/) explains what database ownership isolates, why the task role must not receive lifecycle privileges, and when operators need separate `CONNECT` or `pg_hba.conf` policy.
+
 That separation follows a broader MCP security principle: minimize the server's scope and privileges instead of relying on instructions alone. The MCP security guidance recommends restricted access and scope minimization for servers that can act on local resources ([MCP security best practices](https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices)). A per-owner lifecycle quota is one narrow policy boundary around a destructive-capable database tool surface.
 
 ## Step 1: define an owner identity that survives retries

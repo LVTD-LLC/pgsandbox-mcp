@@ -40,6 +40,7 @@
 | /blog/owner-label-policy-shared-pgsandbox-profiles/ | Owner and Label Policy for Shared PGSandbox Profiles | owner and label policy; shared PGSandbox profiles; PGSandbox cleanup labels; owner label cleanup policy; postgres sandbox cleanup taxonomy | Guide for designing stable owner and label metadata so shared agent cleanup remains scoped, auditable, and PR-ready. |
 | /blog/postgres-sandbox-ttl-values/ | Postgres Test Database Cleanup: Choosing Sandbox TTLs | Postgres sandbox TTL; choose ttlMinutes; database sandbox retention budget; Postgres test database cleanup; coding-agent sandbox timeout | How-to guide for choosing TTL from task runtime, review buffer, recovery margin, and profile limits. |
 | /blog/postgres-sandbox-quotas-coding-agents/ | Postgres Sandbox Quotas for Coding Agents | Postgres sandbox quotas; per-owner sandbox quota; maxActiveDatabasesPerOwner; coding-agent database limits; active sandbox budget | Guide to exact owner/profile quota accounting, configuration, recovery, and current concurrency boundaries. |
+| /blog/per-sandbox-postgres-roles-coding-agents/ | Per-Sandbox Postgres Roles for Coding Agents | per-sandbox Postgres role; Postgres role per database; coding-agent database role; task-scoped Postgres login; sandbox role authority boundary | Guide to separating lifecycle authority, task-database ownership, and cluster access for coding-agent Postgres workflows. |
 
 ## Changelog
 
