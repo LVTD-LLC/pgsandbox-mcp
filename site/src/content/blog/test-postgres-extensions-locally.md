@@ -291,6 +291,8 @@ That hides privilege and ownership failures. Install and run application checks 
 
 Capture `extversion`, then exercise the exact feature used by the application. Extension names stay stable while behavior and available update paths can change.
 
+When the dependency is already deployed, use the [PostgreSQL extension upgrade testing workflow](/blog/test-postgres-extension-upgrades/) to inspect the packaged path and compare an upgraded sandbox with a new-database target lane.
+
 ### Ignoring clone and restore ordering
 
 An extension-dependent schema can fail during restore even after a manual smoke test passes. Install required target extensions before restore and exclude only source-specific entries that the target does not need.
