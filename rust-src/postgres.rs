@@ -1264,6 +1264,88 @@ pub struct CommandWorkflowOutput {
     pub stderr_truncated: bool,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionCleanupPolicy {
+    Always,
+    OnSuccess,
+    Keep,
+}
+
+impl Default for SessionCleanupPolicy {
+    fn default() -> Self {
+        Self::Always
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WithDatabaseInput {
+    pub repo_path: String,
+    pub profile: Option<String>,
+    pub postgres_version: Option<String>,
+    pub name_hint: Option<String>,
+    pub ttl_minutes: Option<i64>,
+    pub owner: Option<String>,
+    pub labels: Option<BTreeMap<String, Value>>,
+    pub extensions: Option<Vec<String>>,
+    pub command: Vec<String>,
+    pub timeout_seconds: Option<u64>,
+    pub database_url_env_names: Option<Vec<String>>,
+    pub connection_mode: Option<RepoCommandConnectionMode>,
+    pub cleanup: SessionCleanupPolicy,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WithDatabaseOutput {
+    pub schema_version: u8,
+    pub status: String,
+    pub sandbox: Option<SessionSandboxOutput>,
+    pub requested_extensions: Vec<String>,
+    pub command: Option<SessionCommandOutput>,
+    pub cleanup: SessionCleanupOutput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provision_error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_error_code: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSandboxOutput {
+    pub database_id: String,
+    pub database_name: String,
+    pub profile: String,
+    pub postgres_version: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCommandOutput {
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
+    pub timed_out: bool,
+    pub elapsed_ms: u128,
+    pub stdout: String,
+    pub stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCleanupOutput {
+    pub policy: SessionCleanupPolicy,
+    pub attempted: bool,
+    pub deleted: bool,
+    pub retained: bool,
+    pub already_absent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ValidateSchemaChangeOutput {
@@ -1468,6 +1550,7 @@ struct CommandRunResult {
     command: Vec<String>,
     elapsed_ms: u128,
     exit_code: Option<i32>,
+    signal: Option<i32>,
     timed_out: bool,
     stdout: String,
     stderr: String,
@@ -3048,6 +3131,169 @@ impl PostgresSandboxManager {
         input: RunRepoCommandInput,
     ) -> anyhow::Result<WorkflowEnvelope<CommandWorkflowOutput>> {
         self.run_repo_schema_command(input).await
+    }
+
+    pub async fn with_database(
+        &self,
+        input: WithDatabaseInput,
+        cancellation: Option<tokio::sync::watch::Receiver<Option<i32>>>,
+    ) -> anyhow::Result<WithDatabaseOutput> {
+        let requested_extensions = input.extensions.clone().unwrap_or_default();
+        let created = match self
+            .create_database(CreateDatabaseInput {
+                profile: input.profile.clone(),
+                postgres_version: input.postgres_version.clone(),
+                name_hint: input.name_hint,
+                ttl_minutes: input.ttl_minutes,
+                owner: input.owner,
+                labels: input.labels,
+                extensions: input.extensions,
+            })
+            .await
+        {
+            Ok(created) => created,
+            Err(error) => {
+                return Ok(WithDatabaseOutput {
+                    schema_version: 1,
+                    status: "provision-failed".to_string(),
+                    sandbox: None,
+                    requested_extensions,
+                    command: None,
+                    cleanup: SessionCleanupOutput {
+                        policy: input.cleanup,
+                        attempted: false,
+                        deleted: false,
+                        retained: false,
+                        already_absent: false,
+                        error_code: None,
+                    },
+                    provision_error_code: Some(lifecycle_error_code(&error).to_string()),
+                    command_error_code: None,
+                });
+            }
+        };
+
+        let sandbox = SessionSandboxOutput {
+            database_id: created.database_id.clone(),
+            database_name: created.database_name.clone(),
+            profile: created.profile.clone(),
+            postgres_version: created.resolved_postgres_version.clone(),
+            expires_at: created.expires_at,
+        };
+        let repo_path = PathBuf::from(&input.repo_path);
+        let database_url_env_names = input.database_url_env_names.unwrap_or_default();
+        let command_result = if !repo_path.is_dir() {
+            Err(anyhow::anyhow!("repo_not_found"))
+        } else if !command_is_bounded(&input.command) {
+            Err(anyhow::anyhow!("unclear_command"))
+        } else if validate_database_url_env_names(&database_url_env_names).is_err() {
+            Err(anyhow::anyhow!("invalid_database_url_env_names"))
+        } else {
+            match repo_command_database_url(&created.connection_string, input.connection_mode) {
+                Ok(database_url) => {
+                    execute_repo_command_until(
+                        &repo_path,
+                        &input.command,
+                        &database_url,
+                        workflow_timeout(input.timeout_seconds),
+                        RepoCommandExecutionOptions {
+                            database_url_env_names,
+                            ..RepoCommandExecutionOptions::default()
+                        },
+                        cancellation,
+                    )
+                    .await
+                }
+                Err(_) => Err(anyhow::anyhow!("invalid_connection_mode")),
+            }
+        };
+
+        let command_succeeded = command_result.as_ref().is_ok_and(|result| {
+            result.exit_code == Some(0) && !result.timed_out && result.signal.is_none()
+        });
+        let command_error_code = command_result
+            .as_ref()
+            .err()
+            .map(|error| session_command_error_code(error).to_string());
+        let should_cleanup = match input.cleanup {
+            SessionCleanupPolicy::Always => true,
+            SessionCleanupPolicy::OnSuccess => command_succeeded,
+            SessionCleanupPolicy::Keep => false,
+        };
+        let mut cleanup = SessionCleanupOutput {
+            policy: input.cleanup,
+            attempted: should_cleanup,
+            deleted: false,
+            retained: !should_cleanup,
+            already_absent: false,
+            error_code: None,
+        };
+        if should_cleanup {
+            match self
+                .delete_database(DatabaseSelector {
+                    profile: Some(created.profile.clone()),
+                    postgres_version: None,
+                    database_id: Some(created.database_id.clone()),
+                    database_name: None,
+                })
+                .await
+            {
+                Ok(_) => cleanup.deleted = true,
+                Err(error) if database_already_absent(&error) => {
+                    cleanup.deleted = true;
+                    cleanup.already_absent = true;
+                }
+                Err(_) => {
+                    cleanup.retained = true;
+                    cleanup.error_code = Some("cleanup-failed".to_string());
+                }
+            }
+        }
+
+        let (status, command) = match command_result {
+            Ok(result) => {
+                let status = if result.timed_out {
+                    "timed-out"
+                } else if result.signal.is_some() {
+                    "interrupted"
+                } else if result.exit_code == Some(0) {
+                    if cleanup.error_code.is_some() {
+                        "cleanup-failed"
+                    } else if cleanup.retained {
+                        "retained"
+                    } else {
+                        "succeeded"
+                    }
+                } else {
+                    "child-failed"
+                };
+                (
+                    status.to_string(),
+                    Some(SessionCommandOutput {
+                        exit_code: result.exit_code,
+                        signal: result.signal,
+                        timed_out: result.timed_out,
+                        elapsed_ms: result.elapsed_ms,
+                        stdout: result.stdout,
+                        stderr: result.stderr,
+                        stdout_truncated: result.stdout_truncated,
+                        stderr_truncated: result.stderr_truncated,
+                    }),
+                )
+            }
+            Err(_) => ("child-spawn-failed".to_string(), None),
+        };
+
+        Ok(WithDatabaseOutput {
+            schema_version: 1,
+            status,
+            sandbox: Some(sandbox),
+            requested_extensions,
+            command,
+            cleanup,
+            provision_error_code: None,
+            command_error_code,
+        })
     }
 
     async fn run_repo_schema_command(
@@ -5271,7 +5517,18 @@ async fn execute_repo_command(
     command: &[String],
     database_url: &str,
     timeout: StdDuration,
+    options: RepoCommandExecutionOptions,
+) -> anyhow::Result<CommandRunResult> {
+    execute_repo_command_until(repo_path, command, database_url, timeout, options, None).await
+}
+
+async fn execute_repo_command_until(
+    repo_path: &Path,
+    command: &[String],
+    database_url: &str,
+    timeout: StdDuration,
     mut options: RepoCommandExecutionOptions,
+    cancellation: Option<tokio::sync::watch::Receiver<Option<i32>>>,
 ) -> anyhow::Result<CommandRunResult> {
     if !repo_path.is_dir() {
         anyhow::bail!("repoPath is not a directory: {}", repo_path.display());
@@ -5338,18 +5595,33 @@ async fn execute_repo_command(
         capture_limit,
     ));
     let mut timed_out = false;
+    let mut signal = None;
     let mut stdin_delivery_error = None;
     let mut stdout_result = None;
     let mut stderr_result = None;
-    let exit_code = match time::timeout_at(deadline, child.wait()).await {
-        Ok(status) => status?.code(),
-        Err(_) => {
-            timed_out = true;
-            None
+    let exit_code = if let Some(cancellation) = cancellation {
+        tokio::select! {
+            status = child.wait() => status?.code(),
+            _ = time::sleep_until(deadline) => {
+                timed_out = true;
+                None
+            }
+            received_signal = wait_for_session_signal(cancellation) => {
+                signal = received_signal;
+                None
+            }
+        }
+    } else {
+        match time::timeout_at(deadline, child.wait()).await {
+            Ok(status) => status?.code(),
+            Err(_) => {
+                timed_out = true;
+                None
+            }
         }
     };
 
-    if !timed_out {
+    if !timed_out && signal.is_none() {
         if let Some(task) = stdin_task.as_mut() {
             match time::timeout_at(deadline, task).await {
                 Ok(result) => {
@@ -5359,20 +5631,21 @@ async fn execute_repo_command(
             }
         }
     }
-    if !timed_out {
+    if !timed_out && signal.is_none() {
         match time::timeout_at(deadline, &mut stdout_task).await {
             Ok(result) => stdout_result = Some(result.context("stdout task failed")??),
             Err(_) => timed_out = true,
         }
     }
-    if !timed_out {
+    if !timed_out && signal.is_none() {
         match time::timeout_at(deadline, &mut stderr_task).await {
             Ok(result) => stderr_result = Some(result.context("stderr task failed")??),
             Err(_) => timed_out = true,
         }
     }
 
-    let (exit_code, stdout, stdout_truncated, stderr, stderr_truncated) = if timed_out {
+    let terminated = timed_out || signal.is_some();
+    let (exit_code, stdout, stdout_truncated, stderr, stderr_truncated) = if terminated {
         if let Some(task) = stdin_task.as_ref() {
             task.abort();
         }
@@ -5423,12 +5696,26 @@ async fn execute_repo_command(
         command: command.to_vec(),
         elapsed_ms: started.elapsed().as_millis(),
         exit_code,
+        signal,
         timed_out,
         stdout,
         stderr,
         stdout_truncated,
         stderr_truncated,
     })
+}
+
+async fn wait_for_session_signal(
+    mut cancellation: tokio::sync::watch::Receiver<Option<i32>>,
+) -> Option<i32> {
+    loop {
+        if cancellation.borrow().is_some() {
+            return *cancellation.borrow();
+        }
+        if cancellation.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 fn configure_repo_command_process(command: &mut Command) {
@@ -6265,6 +6552,29 @@ fn lifecycle_error_code(error: &anyhow::Error) -> &'static str {
         }
     }
     "lifecycle_failed"
+}
+
+fn database_already_absent(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("Database was not found in PGSandbox metadata")
+    })
+}
+
+fn session_command_error_code(error: &anyhow::Error) -> &'static str {
+    let message = error.to_string();
+    for code in [
+        "repo_not_found",
+        "unclear_command",
+        "invalid_database_url_env_names",
+        "invalid_connection_mode",
+    ] {
+        if message == code {
+            return code;
+        }
+    }
+    "child_spawn_failed"
 }
 
 async fn enforce_owner_quota(
@@ -9222,6 +9532,40 @@ mod tests {
         assert!(result.stderr.contains("timed out after 1 seconds"));
     }
 
+    #[tokio::test]
+    async fn execute_repo_command_translates_cancellation_and_redacts_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf \"$DATABASE_URL\\n$PGPASSWORD\\n\"; sleep 5".to_string(),
+        ];
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        let cancellation = tokio::spawn(async move {
+            time::sleep(StdDuration::from_millis(50)).await;
+            sender.send(Some(15)).unwrap();
+        });
+
+        let result = execute_repo_command_until(
+            directory.path(),
+            &command,
+            test_database_url(),
+            StdDuration::from_secs(5),
+            RepoCommandExecutionOptions::default(),
+            Some(receiver),
+        )
+        .await
+        .unwrap();
+        cancellation.await.unwrap();
+
+        assert_eq!(result.exit_code, None);
+        assert_eq!(result.signal, Some(15));
+        assert!(!result.timed_out);
+        assert!(result.stdout.contains("[REDACTED]"));
+        assert!(!result.stdout.contains("secret"));
+        assert!(result.elapsed_ms < 3_000, "{result:?}");
+    }
+
     #[test]
     fn readonly_guard_rejects_transaction_control() {
         assert!(assert_safe_readonly_sql("select * from users").is_ok());
@@ -10245,6 +10589,34 @@ mod tests {
     }
 
     #[test]
+    fn session_cleanup_policy_uses_explicit_cli_values() {
+        assert_eq!(
+            serde_json::from_str::<SessionCleanupPolicy>("\"always\"").unwrap(),
+            SessionCleanupPolicy::Always
+        );
+        assert_eq!(
+            serde_json::from_str::<SessionCleanupPolicy>("\"on-success\"").unwrap(),
+            SessionCleanupPolicy::OnSuccess
+        );
+        assert_eq!(
+            serde_json::from_str::<SessionCleanupPolicy>("\"keep\"").unwrap(),
+            SessionCleanupPolicy::Keep
+        );
+        assert!(serde_json::from_str::<SessionCleanupPolicy>("\"never\"").is_err());
+    }
+
+    #[test]
+    fn session_cleanup_treats_already_deleted_sandbox_as_idempotent() {
+        let error =
+            anyhow::anyhow!("Database was not found in PGSandbox metadata for databaseId test-id.");
+
+        assert!(database_already_absent(&error));
+        assert!(!database_already_absent(&anyhow::anyhow!(
+            "permission denied"
+        )));
+    }
+
+    #[test]
     fn row_limit_validation_accepts_negative_values_after_deserialization() {
         let input = serde_json::from_value::<RunSqlInput>(json!({
             "databaseId": "db-id",
@@ -10327,6 +10699,20 @@ mod tests {
             query_mode("create table users(id int)"),
             QueryMode::Simple
         ));
+    }
+
+    #[test]
+    fn session_command_error_codes_do_not_echo_spawn_errors() {
+        assert_eq!(
+            session_command_error_code(&anyhow::anyhow!("repo_not_found")),
+            "repo_not_found"
+        );
+        assert_eq!(
+            session_command_error_code(&anyhow::anyhow!(
+                "failed to spawn /tmp/postgres://user:secret@localhost/db"
+            )),
+            "child_spawn_failed"
+        );
     }
 
     #[test]

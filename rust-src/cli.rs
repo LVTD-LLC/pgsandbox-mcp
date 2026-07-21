@@ -26,7 +26,8 @@ use crate::{
         DiffSchemaSnapshotInput, ExplainQueryInput, ListDatabasesInput, ListExtensionsInput,
         ListProfilesInput, ListSchemaSnapshotsInput, ListTemplatesInput, PostgresSandboxManager,
         PrepareForRepoInput, RunRepoCommandInput, RunSqlInput, RunSqlOutput, SchemaDiffInput,
-        SeedDatabaseInput, ValidateSchemaChangeInput,
+        SeedDatabaseInput, SessionCleanupPolicy, ValidateSchemaChangeInput, WithDatabaseInput,
+        WithDatabaseOutput,
     },
     setup::{
         build_launch_config, config_snippet, parse_client, parse_scope, resolve_targets,
@@ -83,6 +84,10 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<u8> {
             print_help();
             Ok(0)
         }
+        "with-database" if has_help_flag(&rest) => {
+            print_help();
+            Ok(0)
+        }
         "setup" => setup(&rest).await,
         "tool" => cli_tool_from_tool_subcommand(&rest).await,
         "doctor" if uses_tool_json_mode(&rest) => cli_tool(command, &rest).await,
@@ -95,6 +100,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<u8> {
         "uninstall" => uninstall(&rest).await,
         "local" => local(&rest).await,
         "smoke-test" => smoke_test(&rest).await,
+        "with-database" => with_database(&rest).await,
         "" => start_server().await.map(|()| 0),
         other if find_cli_tool_command(other).is_some() => cli_tool(other, &rest).await,
         other => anyhow::bail!("Unknown command: {other}"),
@@ -103,6 +109,191 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<u8> {
 
 async fn start_server() -> anyhow::Result<()> {
     serve_stdio(load_config_deferred_local()?).await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionResultFormat {
+    Human,
+    Json,
+}
+
+async fn with_database(args: &[String]) -> anyhow::Result<u8> {
+    let (input, result_format) = parse_with_database_args(args)?;
+    let manager = PostgresSandboxManager::new(load_config_deferred_local()?);
+    let cancellation = session_signal_receiver()?;
+    let output = manager.with_database(input, Some(cancellation)).await?;
+
+    match result_format {
+        SessionResultFormat::Json => println!("{}", serde_json::to_string_pretty(&output)?),
+        SessionResultFormat::Human => print_session_result(&output),
+    }
+    Ok(session_exit_code(&output))
+}
+
+fn parse_with_database_args(
+    args: &[String],
+) -> anyhow::Result<(WithDatabaseInput, SessionResultFormat)> {
+    let separator = args
+        .iter()
+        .position(|arg| arg == "--")
+        .context("with-database requires `--` before the child command")?;
+    let child_command = args[separator + 1..].to_vec();
+    if child_command.is_empty() {
+        anyhow::bail!("with-database requires a child command after `--`");
+    }
+
+    let mut profile = None;
+    let mut postgres_version = None;
+    let mut name_hint = Some("test session".to_string());
+    let mut ttl_minutes = None;
+    let mut owner = Some("with-database".to_string());
+    let mut extensions = Vec::new();
+    let mut timeout_seconds = None;
+    let mut database_url_env_names = Vec::new();
+    let mut connection_mode = None;
+    let mut cleanup = SessionCleanupPolicy::Always;
+    let mut result_format = SessionResultFormat::Human;
+    let mut repo_path = std::env::current_dir()?.to_string_lossy().into_owned();
+    let mut index = 0;
+    while index < separator {
+        let arg = &args[index];
+        let (option, inline_value) = arg
+            .split_once('=')
+            .map_or((arg.as_str(), None), |(option, value)| {
+                (option, Some(value))
+            });
+        let value = |index: usize| -> anyhow::Result<&str> {
+            inline_value
+                .or_else(|| args.get(index + 1).map(String::as_str))
+                .with_context(|| format!("Missing value for {option}"))
+        };
+        let consumed = usize::from(inline_value.is_none()) + 1;
+        match option {
+            "--profile" => profile = Some(value(index)?.to_string()),
+            "--postgres-version" => postgres_version = Some(value(index)?.to_string()),
+            "--name-hint" => name_hint = Some(value(index)?.to_string()),
+            "--ttl-minutes" => ttl_minutes = Some(value(index)?.parse()?),
+            "--owner" => owner = Some(value(index)?.to_string()),
+            "--extension" => extensions.push(value(index)?.to_string()),
+            "--timeout-seconds" => timeout_seconds = Some(value(index)?.parse()?),
+            "--database-url-env" => database_url_env_names.push(value(index)?.to_string()),
+            "--connection-mode" => {
+                connection_mode = Some(match value(index)? {
+                    "direct" => crate::postgres::RepoCommandConnectionMode::Direct,
+                    "local-container" => crate::postgres::RepoCommandConnectionMode::LocalContainer,
+                    other => anyhow::bail!(
+                        "Invalid --connection-mode {other}; use direct or local-container"
+                    ),
+                })
+            }
+            "--cleanup" => {
+                cleanup = match value(index)? {
+                    "always" => SessionCleanupPolicy::Always,
+                    "on-success" => SessionCleanupPolicy::OnSuccess,
+                    "keep" => SessionCleanupPolicy::Keep,
+                    other => {
+                        anyhow::bail!("Invalid --cleanup {other}; use always, on-success, or keep")
+                    }
+                }
+            }
+            "--result-format" => {
+                result_format = match value(index)? {
+                    "human" => SessionResultFormat::Human,
+                    "json" => SessionResultFormat::Json,
+                    other => anyhow::bail!("Invalid --result-format {other}; use human or json"),
+                }
+            }
+            "--repo-path" => repo_path = value(index)?.to_string(),
+            other => anyhow::bail!("Unknown with-database option: {other}"),
+        }
+        index += consumed;
+    }
+
+    Ok((
+        WithDatabaseInput {
+            repo_path,
+            profile,
+            postgres_version,
+            name_hint,
+            ttl_minutes,
+            owner,
+            labels: Some(
+                [(
+                    "workflow".to_string(),
+                    Value::String("with-database".into()),
+                )]
+                .into(),
+            ),
+            extensions: (!extensions.is_empty()).then_some(extensions),
+            command: child_command,
+            timeout_seconds,
+            database_url_env_names: (!database_url_env_names.is_empty())
+                .then_some(database_url_env_names),
+            connection_mode,
+            cleanup,
+        },
+        result_format,
+    ))
+}
+
+fn session_signal_receiver() -> anyhow::Result<tokio::sync::watch::Receiver<Option<i32>>> {
+    let (sender, receiver) = tokio::sync::watch::channel(None);
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        let mut terminate = signal(SignalKind::terminate())?;
+        tokio::spawn(async move {
+            let received = tokio::select! {
+                _ = interrupt.recv() => libc::SIGINT,
+                _ = terminate.recv() => libc::SIGTERM,
+            };
+            let _ = sender.send(Some(received));
+        });
+    }
+    #[cfg(not(unix))]
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            let _ = sender.send(Some(2));
+        }
+    });
+    Ok(receiver)
+}
+
+fn print_session_result(output: &WithDatabaseOutput) {
+    if let Some(command) = &output.command {
+        print!("{}", command.stdout);
+        eprint!("{}", command.stderr);
+    }
+    if let Some(sandbox) = &output.sandbox {
+        eprintln!(
+            "pgsandbox session {}: {} (cleanup: {:?}, expires: {})",
+            output.status, sandbox.database_id, output.cleanup.policy, sandbox.expires_at
+        );
+    } else {
+        eprintln!("pgsandbox session {}", output.status);
+    }
+}
+
+fn session_exit_code(output: &WithDatabaseOutput) -> u8 {
+    if let Some(command) = &output.command {
+        if command.timed_out {
+            return 124;
+        }
+        if let Some(signal) = command.signal {
+            return u8::try_from(128_i32.saturating_add(signal)).unwrap_or(1);
+        }
+        if let Some(exit_code) = command.exit_code {
+            if exit_code != 0 {
+                return u8::try_from(exit_code).unwrap_or(1);
+            }
+        }
+    }
+    if output.status == "succeeded" || output.status == "retained" {
+        0
+    } else {
+        1
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2097,6 +2288,8 @@ Usage:
   pgsandbox local stop [options]     Stop the managed local Postgres cluster
   pgsandbox local status [options]   Show managed local Postgres status
   pgsandbox smoke-test [options]     Create, query, and delete a sandbox
+  pgsandbox with-database [options] -- <command> [args...]
+                                     Run one command with a fresh sandbox database
   pgsandbox upgrade [options]        Upgrade the binary, then run setup all and doctor
   pgsandbox uninstall [options]      Remove PGSandbox binaries, MCP config entries, and local state
 
@@ -2123,6 +2316,15 @@ Postgres ensure options:
 
 Smoke-test options:
   --verbose                           Print full structured SQL result dictionaries
+
+With-database options:
+  --postgres-version <major>          Target a managed local Postgres version
+  --extension <name>                  Install an allowed extension; repeat as needed
+  --cleanup <policy>                  always (default), on-success, or keep
+  --timeout-seconds <seconds>         Stop the command and clean up after the timeout
+  --database-url-env <name>           Inject the database URL into another environment variable
+  --result-format <human|json>        Print concise output or a versioned JSON result
+  --repo-path <path>                  Child working directory; defaults to the current directory
 
 Extension discovery options:
   --profile <profile>                 Target a configured profile
@@ -2560,5 +2762,55 @@ mod tests {
         let help = help_text();
 
         assert!(help.contains("Check and start managed local Postgres"));
+    }
+
+    #[test]
+    fn with_database_parser_keeps_child_argv_and_explicit_policies() {
+        let (input, format) = parse_with_database_args(&args(&[
+            "--postgres-version=18",
+            "--extension",
+            "vector",
+            "--extension=pg_trgm",
+            "--cleanup=on-success",
+            "--result-format",
+            "json",
+            "--",
+            "cargo",
+            "test",
+            "--all",
+        ]))
+        .unwrap();
+
+        assert_eq!(input.postgres_version.as_deref(), Some("18"));
+        assert_eq!(
+            input.extensions.unwrap(),
+            vec!["vector".to_string(), "pg_trgm".to_string()]
+        );
+        assert_eq!(input.cleanup, SessionCleanupPolicy::OnSuccess);
+        assert_eq!(format, SessionResultFormat::Json);
+        assert_eq!(input.command, args(&["cargo", "test", "--all"]));
+    }
+
+    #[test]
+    fn with_database_parser_rejects_implicit_or_unknown_cleanup() {
+        let missing_separator = parse_with_database_args(&args(&["cargo", "test"]))
+            .unwrap_err()
+            .to_string();
+        assert!(missing_separator.contains("requires `--`"));
+
+        let unknown =
+            parse_with_database_args(&args(&["--cleanup", "never", "--", "cargo", "test"]))
+                .unwrap_err()
+                .to_string();
+        assert!(unknown.contains("always, on-success, or keep"));
+    }
+
+    #[test]
+    fn help_text_lists_with_database_contract() {
+        let help = help_text();
+
+        assert!(help.contains("pgsandbox with-database"));
+        assert!(help.contains("always (default), on-success, or keep"));
+        assert!(help.contains("--result-format <human|json>"));
     }
 }

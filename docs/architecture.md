@@ -80,6 +80,13 @@ Extension discovery is read-only catalog inspection: profile-scoped discovery
 reports `pg_available_extensions` before creation, while sandbox-scoped
 discovery connects with the sandbox role and reports both available and
 installed extensions.
+Each requested extension also produces a credential-free `extension_install`
+audit event. Its details record the originating lifecycle operation, extension,
+request owner as actor, and final `installed` or `rolled_back` outcome. Failures
+store only a stable error code and cleanup outcome, never a raw Postgres error
+or connection string. Requests rejected by the profile allowlist are denied
+before any admin connection or sandbox identity exists, so they do not create a
+database-scoped audit event.
 Sandbox role passwords are encrypted before being persisted in the metadata table.
 Metadata setup encrypts older unencrypted local rows in place before strict
 password reads.

@@ -2,6 +2,11 @@
 
 ## 2026-07-21
 
+- Added `pgsandbox with-database` for one-shot agent test sessions with PostgreSQL
+  version and extension selection, explicit cleanup policies, signal/timeout exit
+  translation, bounded credential-redacted child output, and versioned JSON results.
+- Added credential-free per-extension lifecycle audit outcomes, including clone
+  provenance and rollback cleanup status.
 - Changed requested extension installation to run through PGSandbox's admin lifecycle while
   keeping returned sandbox roles non-superuser and without `CREATEDB`.
 - Added profile-level `allowedExtensions` authorization for privileged extension installation;
