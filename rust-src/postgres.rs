@@ -1919,6 +1919,15 @@ impl PostgresSandboxManager {
         &self,
         input: CreateDatabaseInput,
     ) -> anyhow::Result<CreateDatabaseOutput> {
+        self.create_database_for_operation(input, "create_database")
+            .await
+    }
+
+    async fn create_database_for_operation(
+        &self,
+        input: CreateDatabaseInput,
+        operation: &'static str,
+    ) -> anyhow::Result<CreateDatabaseOutput> {
         let CreateDatabaseInput {
             profile,
             postgres_version,
@@ -2015,7 +2024,7 @@ impl PostgresSandboxManager {
                 .await?;
             let _ = record_audit_event(
                 &client,
-                "create_database",
+                operation,
                 &profile.name,
                 &names.database_id,
                 &names.database_name,
@@ -2028,27 +2037,50 @@ impl PostgresSandboxManager {
                 }),
             )
             .await;
+            for extension in &extensions {
+                let _ = record_audit_event(
+                    &client,
+                    "extension_install",
+                    &profile.name,
+                    &names.database_id,
+                    &names.database_name,
+                    Some(&names.role_name),
+                    extension_audit_details(
+                        operation,
+                        extension,
+                        owner.as_deref(),
+                        "installed",
+                        None,
+                        None,
+                    ),
+                )
+                .await;
+            }
             anyhow::Ok(())
         }
         .await;
 
         if let Err(error) = result {
+            let mut database_cleanup_succeeded = !created_database;
+            let mut role_cleanup_succeeded = !created_role;
             if created_database {
                 let _ = terminate_database_connections(&client, &names.database_name).await;
-                let _ = client
+                database_cleanup_succeeded = client
                     .batch_execute(&format!(
                         "DROP DATABASE IF EXISTS {}",
                         quote_ident(&names.database_name)?
                     ))
-                    .await;
+                    .await
+                    .is_ok();
             }
             if created_role {
-                let _ = client
+                role_cleanup_succeeded = client
                     .batch_execute(&format!(
                         "DROP ROLE IF EXISTS {}",
                         quote_ident(&names.role_name)?
                     ))
-                    .await;
+                    .await
+                    .is_ok();
             }
             let _ = client
                 .execute(
@@ -2066,9 +2098,33 @@ impl PostgresSandboxManager {
                 &names.database_id,
                 &names.database_name,
                 Some(&names.role_name),
-                json!({ "message": error.to_string() }),
+                json!({
+                    "operation": operation,
+                    "errorCode": lifecycle_error_code(&error),
+                    "databaseCleanupSucceeded": database_cleanup_succeeded,
+                    "roleCleanupSucceeded": role_cleanup_succeeded,
+                }),
             )
             .await;
+            for extension in &extensions {
+                let _ = record_audit_event(
+                    &client,
+                    "extension_install",
+                    &profile.name,
+                    &names.database_id,
+                    &names.database_name,
+                    Some(&names.role_name),
+                    extension_audit_details(
+                        operation,
+                        extension,
+                        owner.as_deref(),
+                        "rolled_back",
+                        Some(lifecycle_error_code(&error)),
+                        Some(database_cleanup_succeeded && role_cleanup_succeeded),
+                    ),
+                )
+                .await;
+            }
             drop(client);
             let _ = connection_task.await;
             return Err(error).with_context(|| target_context.clone());
@@ -2131,15 +2187,18 @@ impl PostgresSandboxManager {
                 .await
                 .with_context(|| target_context.clone())?;
         let created = self
-            .create_database(CreateDatabaseInput {
-                profile: Some(target_profile.name.clone()),
-                postgres_version: None,
-                name_hint,
-                ttl_minutes,
-                owner,
-                labels,
-                extensions: Some(extensions),
-            })
+            .create_database_for_operation(
+                CreateDatabaseInput {
+                    profile: Some(target_profile.name.clone()),
+                    postgres_version: None,
+                    name_hint,
+                    ttl_minutes,
+                    owner,
+                    labels,
+                    extensions: Some(extensions),
+                },
+                "clone_database",
+            )
             .await
             .with_context(|| target_context.clone())?;
 
@@ -6173,6 +6232,41 @@ async fn record_audit_event(
     Ok(())
 }
 
+fn extension_audit_details(
+    operation: &str,
+    extension: &str,
+    actor: Option<&str>,
+    outcome: &str,
+    error_code: Option<&str>,
+    cleanup_succeeded: Option<bool>,
+) -> Value {
+    json!({
+        "operation": operation,
+        "extension": extension,
+        "actor": actor,
+        "outcome": outcome,
+        "errorCode": error_code,
+        "cleanupSucceeded": cleanup_succeeded,
+    })
+}
+
+fn lifecycle_error_code(error: &anyhow::Error) -> &'static str {
+    for cause in error.chain() {
+        let message = cause.to_string();
+        for code in [
+            "extension_setup_required",
+            "extension_not_allowed",
+            "invalid_extensions",
+            "owner_quota_exceeded",
+        ] {
+            if message.contains(code) {
+                return code;
+            }
+        }
+    }
+    "lifecycle_failed"
+}
+
 async fn enforce_owner_quota(
     client: &Client,
     profile: &SandboxProfile,
@@ -10109,6 +10203,45 @@ mod tests {
         assert!(message.contains("extension_setup_required"));
         assert!(message.contains("pg_cron"));
         assert!(message.contains("server-level setup"));
+    }
+
+    #[test]
+    fn extension_audit_details_are_structured_and_secret_free() {
+        let details = extension_audit_details(
+            "clone_database",
+            "pg_trgm",
+            Some("test-agent"),
+            "rolled_back",
+            Some("invalid_extensions"),
+            Some(true),
+        );
+
+        assert_eq!(
+            details,
+            json!({
+                "operation": "clone_database",
+                "extension": "pg_trgm",
+                "actor": "test-agent",
+                "outcome": "rolled_back",
+                "errorCode": "invalid_extensions",
+                "cleanupSucceeded": true,
+            })
+        );
+        assert!(!details.to_string().contains("postgres://"));
+        assert!(!details.to_string().contains("password"));
+    }
+
+    #[test]
+    fn lifecycle_error_codes_never_persist_raw_errors() {
+        let error = anyhow::anyhow!(
+            "invalid_extensions: failed using postgres://admin:super-secret@localhost/postgres"
+        );
+
+        assert_eq!(lifecycle_error_code(&error), "invalid_extensions");
+        assert!(!lifecycle_error_code(&error).contains("secret"));
+
+        let unknown = anyhow::anyhow!("driver failed with password=super-secret");
+        assert_eq!(lifecycle_error_code(&unknown), "lifecycle_failed");
     }
 
     #[test]
