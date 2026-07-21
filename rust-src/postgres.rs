@@ -3360,38 +3360,23 @@ impl PostgresSandboxManager {
             }
         }
 
-        let (status, command) = match command_result {
-            Ok(result) => {
-                let status = if result.timed_out {
-                    SessionStatus::TimedOut
-                } else if result.signal.is_some() {
-                    SessionStatus::Interrupted
-                } else if result.exit_code == Some(0) {
-                    if cleanup.error_code.is_some() {
-                        SessionStatus::CleanupFailed
-                    } else if cleanup.retained {
-                        SessionStatus::Retained
-                    } else {
-                        SessionStatus::Succeeded
-                    }
-                } else {
-                    SessionStatus::ChildFailed
-                };
-                (
-                    status,
-                    Some(SessionCommandOutput {
-                        exit_code: result.exit_code,
-                        signal: result.signal,
-                        timed_out: result.timed_out,
-                        elapsed_ms: result.elapsed_ms,
-                        stdout: result.stdout,
-                        stderr: result.stderr,
-                        stdout_truncated: result.stdout_truncated,
-                        stderr_truncated: result.stderr_truncated,
-                    }),
-                )
-            }
-            Err(_) => (SessionStatus::ChildSpawnFailed, None),
+        let status = session_status(
+            command_result.as_ref().ok(),
+            cleanup.error_code.is_some(),
+            cleanup.retained,
+        );
+        let command = match command_result {
+            Ok(result) => Some(SessionCommandOutput {
+                exit_code: result.exit_code,
+                signal: result.signal,
+                timed_out: result.timed_out,
+                elapsed_ms: result.elapsed_ms,
+                stdout: result.stdout,
+                stderr: result.stderr,
+                stdout_truncated: result.stdout_truncated,
+                stderr_truncated: result.stderr_truncated,
+            }),
+            Err(_) => None,
         };
 
         Ok(WithDatabaseOutput {
@@ -6779,6 +6764,32 @@ fn session_should_cleanup(policy: SessionCleanupPolicy, command_succeeded: bool)
         SessionCleanupPolicy::Always => true,
         SessionCleanupPolicy::OnSuccess => command_succeeded,
         SessionCleanupPolicy::Keep => false,
+    }
+}
+
+fn session_status(
+    command: Option<&CommandRunResult>,
+    cleanup_failed: bool,
+    retained: bool,
+) -> SessionStatus {
+    if cleanup_failed {
+        return SessionStatus::CleanupFailed;
+    }
+    let Some(command) = command else {
+        return SessionStatus::ChildSpawnFailed;
+    };
+    if command.timed_out {
+        SessionStatus::TimedOut
+    } else if command.signal.is_some() {
+        SessionStatus::Interrupted
+    } else if command.exit_code == Some(0) {
+        if retained {
+            SessionStatus::Retained
+        } else {
+            SessionStatus::Succeeded
+        }
+    } else {
+        SessionStatus::ChildFailed
     }
 }
 
@@ -10945,6 +10956,40 @@ mod tests {
         ));
         assert!(!session_should_cleanup(SessionCleanupPolicy::Keep, true));
         assert!(!session_should_cleanup(SessionCleanupPolicy::Keep, false));
+    }
+
+    #[test]
+    fn session_cleanup_failure_is_the_primary_status() {
+        let command = |exit_code, signal, timed_out| CommandRunResult {
+            command: vec!["test-command".to_string()],
+            elapsed_ms: 1,
+            exit_code,
+            signal,
+            timed_out,
+            stdout: String::new(),
+            stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+        };
+
+        for result in [
+            command(Some(17), None, false),
+            command(None, Some(2), false),
+            command(Some(124), None, true),
+        ] {
+            assert_eq!(
+                session_status(Some(&result), true, true),
+                SessionStatus::CleanupFailed
+            );
+        }
+        assert_eq!(
+            session_status(None, true, true),
+            SessionStatus::CleanupFailed
+        );
+        assert_eq!(
+            session_status(Some(&command(Some(17), None, false)), false, true),
+            SessionStatus::ChildFailed
+        );
     }
 
     #[test]
