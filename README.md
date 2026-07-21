@@ -238,6 +238,29 @@ pgsandbox tool schema_digest --input "{\"databaseId\":\"$DATABASE_ID\"}"
 pgsandbox run-repo-command --database-id "$DATABASE_ID" --repo-path "$PWD" -- npm run migrate
 ```
 
+For a complete one-shot test session, let PGSandbox create the database, inject
+its connection settings, run the child process, and clean up:
+
+```bash
+pgsandbox with-database \
+  --postgres-version 18 \
+  --extension vector \
+  --cleanup always \
+  -- python -m pytest tests/unit
+```
+
+The child receives `DATABASE_URL`, `PGSANDBOX_DATABASE_URL`, and libpq `PG*`
+variables. PGSandbox captures bounded child output so it can redact the
+generated credentials before returning it. The command preserves nonzero child
+exit codes, translates interruption to the conventional `128 + signal` status,
+and uses exit `124` for a timeout. Use `--cleanup on-success` to retain a failed
+database for debugging or `--cleanup keep` to retain every run; TTL remains the
+backstop. Add `--result-format json` for the versioned, credential-free session
+result.
+
+See [Agent test-suite recipes](docs/agent-testing.md) for framework boundaries,
+Redis assumptions, Django test-database handling, and troubleshooting.
+
 `--input` and `--input-file` accept the same camelCase JSON objects documented
 for MCP tools, so the CLI can reach the full tool surface without adding a
 custom flag for every field.
@@ -1285,6 +1308,7 @@ Integration-style tests live under `tests/`:
 tests/dogfood_reliability.rs
 tests/extensions.rs
 tests/run_sql_serialization.rs
+tests/session_lifecycle.rs
 ```
 
 These tests are compiled by `cargo test`, but live database scenarios are
@@ -1334,6 +1358,14 @@ PGSANDBOX_EXTENSION_E2E=1 \
 
 PGSANDBOX_EXTENSION_E2E=1 PGSANDBOX_EXTENSION_E2E_NAME=citext \
   cargo test --test extensions -- --nocapture
+```
+
+Run the one-shot session cleanup matrix. It verifies a real query plus
+`always`, `on-success`, `keep`, timeout, and child-spawn failure behavior:
+
+```bash
+PGSANDBOX_SESSION_E2E=1 \
+  cargo test --test session_lifecycle -- --nocapture
 ```
 
 Each live test creates a sandbox and attempts cleanup at the end. If cleanup
