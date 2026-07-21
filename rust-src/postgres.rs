@@ -2117,6 +2117,10 @@ impl PostgresSandboxManager {
         let target_profile =
             self.resolve_profile(profile.as_deref(), postgres_version.as_deref())?;
         let target_context = ResolvedTargetContext::from_profile("clone_database", &target_profile);
+        let extensions =
+            normalize_extension_names(extensions).with_context(|| target_context.clone())?;
+        validate_allowed_extensions(&target_profile, &extensions)
+            .with_context(|| target_context.clone())?;
         let target_postgres_version = postgres_major_for_profile(&target_profile)
             .await
             .with_context(|| target_context.clone())?;
@@ -2134,7 +2138,7 @@ impl PostgresSandboxManager {
                 ttl_minutes,
                 owner,
                 labels,
-                extensions,
+                extensions: Some(extensions),
             })
             .await
             .with_context(|| target_context.clone())?;
@@ -10021,6 +10025,47 @@ mod tests {
         assert!(message.contains("extension_not_allowed"));
         assert!(!message.contains("connection"));
         assert!(!message.contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn clone_rejects_denied_extension_before_source_preflight() {
+        let config = crate::config::parse_config_file(
+            r#"{
+              "defaultProfile": "unreachable",
+              "profiles": [{
+                "name": "unreachable",
+                "adminUrl": "postgres://postgres:admin-secret@127.0.0.1:1/postgres",
+                "postgresVersion": "18",
+                "allowedExtensions": ["vector"]
+              }]
+            }"#,
+        )
+        .unwrap();
+        let manager = PostgresSandboxManager::new(config);
+
+        let error = manager
+            .clone_database(CloneDatabaseInput {
+                profile: None,
+                postgres_version: None,
+                source_database_url: "postgres://postgres:source-secret@127.0.0.1:1/source"
+                    .to_string(),
+                name_hint: Some("denied-clone-extension".to_string()),
+                ttl_minutes: Some(15),
+                timeout_seconds: Some(1),
+                owner: None,
+                labels: None,
+                schema_only: Some(false),
+                extensions: Some(vec!["postgis".to_string()]),
+                exclude_source_extensions: None,
+            })
+            .await
+            .unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("extension_not_allowed"));
+        assert!(!message.contains("source preflight"));
+        assert!(!message.contains("admin-secret"));
+        assert!(!message.contains("source-secret"));
     }
 
     #[test]
